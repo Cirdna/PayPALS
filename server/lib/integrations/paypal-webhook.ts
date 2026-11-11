@@ -11,6 +11,10 @@ import { captureOrder, CheckoutError } from './checkout'
 type Row = Record<string, any>
 export type WebhookOutcome = 'ignored' | 'duplicate' | 'captured' | 'noop' | 'error'
 
+const SANDBOX_HOST = 'api-m.sandbox.paypal.com'
+const apiHost = (base: string): string | null => {
+  try { return new URL(base).host } catch { return null }
+}
 const text = (v: unknown): string => (typeof v === 'string' ? v : '')
 
 /** Verifies the event with PayPal's verify-webhook-signature API. True only on `SUCCESS`; any failure is false. */
@@ -18,6 +22,11 @@ export async function verifyWebhookSignature(headers: Record<string, string | un
   try {
     const webhookId = env.paypalWebhookId
     if (!webhookId) return false
+    // Sandbox only (CLAUDE.md rule 1): never send credentials anywhere but the sandbox API host.
+    if (apiHost(env.paypalApiBase) !== SANDBOX_HOST) {
+      console.warn('[paypal-webhook] PAYPAL_API_BASE is not the PayPal sandbox host: verification skipped')
+      return false
+    }
     const h = (name: string) => text(headers[name])
     const event = JSON.parse(rawBody)
 
@@ -56,6 +65,20 @@ export async function verifyWebhookSignature(headers: Record<string, string | un
 
 /** Handles one PayPal webhook delivery. `headers` must have lowercase keys. Never throws. */
 export async function handlePayPalWebhook(headers: Record<string, string | undefined>, rawBody: string): Promise<WebhookOutcome> {
+  let claimedId: string | null = null
+  const outcome = await processEvent(headers, rawBody, (id) => { claimedId = id })
+  // A failed attempt must not be deduplicated: release the claim so PayPal's retry of the same event can run.
+  if (outcome === 'error' && claimedId) {
+    try {
+      await db().from('webhook_events').delete().eq('id', claimedId)
+    } catch (e) {
+      console.warn('[paypal-webhook] could not release event claim:', e instanceof Error ? e.message : 'unknown error')
+    }
+  }
+  return outcome
+}
+
+async function processEvent(headers: Record<string, string | undefined>, rawBody: string, onClaim: (eventId: string) => void): Promise<WebhookOutcome> {
   try {
     if (!env.paypalWebhookId) {
       console.warn('[paypal-webhook] PAYPAL_WEBHOOK_ID is not set: event ignored')
@@ -85,6 +108,7 @@ export async function handlePayPalWebhook(headers: Record<string, string | undef
       if ((claim.error as { code?: string }).code === '23505') return 'duplicate'
       throw new Error(`Supabase claim webhook event failed: ${claim.error.message}`)
     }
+    onClaim(eventId)
 
     const resource = (event.resource ?? {}) as Row
 

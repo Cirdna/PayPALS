@@ -6,7 +6,7 @@ import { handlePayPalWebhook, verifyWebhookSignature } from '~~/server/lib/integ
 import { createFakeDb, type FakeDb } from '../helpers/fake-db'
 import { DEMO_USER_ID, seedTables } from '../helpers/seed-fixture'
 
-const ENV_KEYS = ['APP_URL', 'PAYPAL_CLIENT_ID', 'PAYPAL_CLIENT_SECRET', 'PAYPAL_WEBHOOK_ID', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET'] as const
+const ENV_KEYS = ['APP_URL', 'PAYPAL_CLIENT_ID', 'PAYPAL_CLIENT_SECRET', 'PAYPAL_WEBHOOK_ID', 'TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET', 'PAYPAL_API_BASE'] as const
 const savedEnv: Record<string, string | undefined> = {}
 
 const ORDER_ID = 'ORDER1234567890ABC'
@@ -118,6 +118,24 @@ describe('verifyWebhookSignature', () => {
   })
 })
 
+describe('verifyWebhookSignature: sandbox only (L8)', () => {
+  it.each([
+    'https://api-m.paypal.com',
+    'https://api-m.sandbox.paypal.com.evil.test',
+    'https://evil.test/api-m.sandbox.paypal.com',
+    'not a url',
+  ])('is false without any network call when PAYPAL_API_BASE is %s', async (base) => {
+    process.env.PAYPAL_API_BASE = base
+    expect(await verifyWebhookSignature(HEADERS, approvedEvent())).toBe(false)
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('still verifies against the sandbox host', async () => {
+    process.env.PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com'
+    expect(await verifyWebhookSignature(HEADERS, approvedEvent())).toBe(true)
+  })
+})
+
 describe('handlePayPalWebhook', () => {
   it('bad signature: nothing captured, event not recorded', async () => {
     verificationStatus = 'FAILURE'
@@ -199,6 +217,21 @@ describe('handlePayPalWebhook', () => {
     execute.mockImplementation(async () => JSON.stringify({ status: 'success', response: { id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED' } }))
     await expect(handlePayPalWebhook(HEADERS, approvedEvent())).resolves.toBe('error')
     expect(fake.rows('orders')[0]!.status).toBe('failed')
+  })
+
+  it('M3. a transient capture failure releases the event id: PayPal\'s retry of the same event is processed', async () => {
+    execute.mockImplementationOnce(async () => { throw new Error('PayPal 503') })
+    expect(await handlePayPalWebhook(HEADERS, approvedEvent('WH-RETRY'))).toBe('error')
+    expect(fake.rows('webhook_events')).toHaveLength(0)
+
+    // the failed attempt marked the order failed; captureOrder accepts 'failed' orders, so the retry can complete it
+    expect(await handlePayPalWebhook(HEADERS, approvedEvent('WH-RETRY'))).toBe('captured')
+    expect(fake.rows('orders')[0]!.status).toBe('completed')
+    expect(fake.rows('webhook_events').map((e) => e.id)).toEqual(['WH-RETRY'])
+
+    // and a third delivery is now a duplicate
+    expect(await handlePayPalWebhook(HEADERS, approvedEvent('WH-RETRY'))).toBe('duplicate')
+    expect(execute).toHaveBeenCalledTimes(2)
   })
 
   it('unknown order id in an APPROVED event: no throw', async () => {
