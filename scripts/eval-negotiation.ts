@@ -266,12 +266,15 @@ async function cleanupItem(itemId: string): Promise<void> {
 
 /**
  * A (wishlist item, listing) pair can have only one match (unique). When a real scan already made one, we must not touch it:
- * run the eval on a paused clone of the wishlist item + mandate instead, and delete the clone afterwards.
+ * run the eval on a throw-away clone of the wishlist item + mandate instead, and delete the clone afterwards.
  */
 async function cloneItem(item: WishlistItem, mandate: Mandate): Promise<{ item: WishlistItem; mandate: Mandate }> {
   const row = unwrap(await db().from('wishlist_items').insert({
     user_id: item.userId, title: `${item.title} [eval tmp]`, query: item.query, specs: item.specs, max_price: item.maxPrice,
-    target_price: item.targetPrice, currency: item.currency, min_condition: item.minCondition, dealbreakers: item.dealbreakers, status: 'paused',
+    target_price: item.targetPrice, currency: item.currency, min_condition: item.minCondition, dealbreakers: item.dealbreakers,
+    // `active`: a negotiation on a paused item is ended at once. `last_scanned_at = now` keeps a background scan
+    // (which takes the least recently scanned items first) from picking the clone up.
+    status: 'active', last_scanned_at: new Date().toISOString(),
   }).select().single(), 'insert temp wishlist item') as Row
   const tmp = toCamel<WishlistItem>(row)
   tempItemIds.add(tmp.id)
