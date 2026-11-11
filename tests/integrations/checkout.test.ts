@@ -16,7 +16,13 @@ process.env.TELEGRAM_WEBHOOK_SECRET = 'hook-secret'
 
 const ORDER_ID = 'ORDER1234567890ABC'
 const CREATE_RESULT = { id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED', links: [{ rel: 'payer-action', href: `https://www.sandbox.paypal.com/checkoutnow?token=${ORDER_ID}` }] }
-const CAPTURE_RESULT = { id: ORDER_ID, status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ id: 'CAPTURE123' }] } }] }
+/** The toolkit's pay_order wraps the PayPal order JSON: { status: 'success', response: <order> } (verified in @paypal/agent-toolkit 1.11.0). */
+const wrapped = (order: unknown) => ({ status: 'success', response: order })
+const capturedOrder = (over: { orderStatus?: string; captureStatus?: string; value?: string; currency?: string } = {}) => ({
+  id: ORDER_ID, status: over.orderStatus ?? 'COMPLETED',
+  purchase_units: [{ payments: { captures: [{ id: 'CAPTURE123', status: over.captureStatus ?? 'COMPLETED', amount: { value: over.value ?? '262.00', currency_code: over.currency ?? 'USD' } }] } }],
+})
+const CAPTURE_RESULT = wrapped(capturedOrder())
 
 let captureBehaviour: () => unknown
 const execute = vi.fn(async (input: unknown) => {
@@ -169,7 +175,7 @@ describe('captureOrder', () => {
   })
 
   it('9a. not COMPLETED: order failed, match stays checkout_pending, order_failed event, capture_failed', async () => {
-    captureBehaviour = () => ({ id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED' })
+    captureBehaviour = () => wrapped({ id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED' })
     await expect(captureOrder(ORDER_ID)).rejects.toMatchObject({ code: 'capture_failed' })
     expect(fake.rows('orders')[0]!.status).toBe('failed')
     expect(fake.rows('matches')[0]!.status).toBe('checkout_pending')
@@ -183,6 +189,46 @@ describe('captureOrder', () => {
     expect(fake.rows('orders')[0]!.status).toBe('failed')
     expect(fake.rows('matches')[0]!.status).toBe('checkout_pending')
     expect(eventTypes()).toContain('order_failed')
+  })
+
+  it('9e. captured amount differs from the stored order amount: failed, never completed', async () => {
+    captureBehaviour = () => wrapped(capturedOrder({ value: '1.00' }))
+    await expect(captureOrder(ORDER_ID)).rejects.toMatchObject({ code: 'capture_failed' })
+    expect(fake.rows('orders')[0]!.status).toBe('failed')
+    expect(fake.rows('matches')[0]!.status).toBe('checkout_pending')
+    expect(eventTypes()).toContain('order_failed')
+    expect(eventTypes()).not.toContain('order_captured')
+  })
+
+  it('9f. captured currency is not USD: failed', async () => {
+    captureBehaviour = () => wrapped(capturedOrder({ currency: 'SGD' }))
+    await expect(captureOrder(ORDER_ID)).rejects.toMatchObject({ code: 'capture_failed' })
+    expect(fake.rows('orders')[0]!.status).toBe('failed')
+  })
+
+  it('9g. capture status PENDING (order COMPLETED): failed', async () => {
+    captureBehaviour = () => wrapped(capturedOrder({ captureStatus: 'PENDING' }))
+    await expect(captureOrder(ORDER_ID)).rejects.toMatchObject({ code: 'capture_failed' })
+    expect(fake.rows('orders')[0]!.status).toBe('failed')
+    expect(fake.rows('matches')[0]!.status).toBe('checkout_pending')
+  })
+
+  it('9h. error-shaped toolkit result: failed, the sanitised PayPal message ends up in the event detail', async () => {
+    captureBehaviour = () => ({ error: { message: 'UNPROCESSABLE_ENTITY: INSTRUMENT_DECLINED', type: 'paypal_error' } })
+    const err = await captureOrder(ORDER_ID).catch((e) => e)
+    expect(err).toMatchObject({ code: 'capture_failed' })
+    expect(err.message).toContain('INSTRUMENT_DECLINED')
+    expect(fake.rows('orders')[0]!.status).toBe('failed')
+    const ev = fake.rows('agent_events').find((e) => e.type === 'order_failed')!
+    expect(ev.payload.detail).toContain('INSTRUMENT_DECLINED')
+  })
+
+  it('9i. wrapper status "error": failed; a long message is truncated to 200 chars and never the raw object', async () => {
+    captureBehaviour = () => ({ status: 'error', response: { message: 'x'.repeat(500) } })
+    await expect(captureOrder(ORDER_ID)).rejects.toMatchObject({ code: 'capture_failed' })
+    const ev = fake.rows('agent_events').find((e) => e.type === 'order_failed')!
+    expect(String(ev.payload.detail).length).toBeLessThanOrEqual(200)
+    expect(ev.payload.detail).not.toContain('[object Object]')
   })
 
   it('9c. race: a concurrent capture completed the order while ours failed: returns it, never marks it failed', async () => {
@@ -200,7 +246,7 @@ describe('captureOrder', () => {
   it('9d. race: a non-COMPLETED capture result after another caller completed the order is not a failure either', async () => {
     execute.mockImplementationOnce(async () => {
       await fake.from('orders').update({ status: 'completed', capture_id: 'CAPTURE-OTHER' }).eq('paypal_order_id', ORDER_ID)
-      return JSON.stringify({ id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED' })
+      return JSON.stringify(wrapped({ id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED' }))
     })
     await expect(captureOrder(ORDER_ID)).resolves.toMatchObject({ status: 'completed' })
     expect(fake.rows('orders')[0]!.status).toBe('completed')

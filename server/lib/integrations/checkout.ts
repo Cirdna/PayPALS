@@ -29,7 +29,30 @@ export class CheckoutError extends Error {
 
 // ── PayPal response parsing. Kept tiny on purpose: adjust to the raw results recorded by the B0 spike. ──
 const orderIdOf = (r: any): string | null => (typeof r?.id === 'string' ? r.id : null)
-const captureOf = (r: any) => ({ status: r?.status as string | undefined, captureId: (r?.purchase_units?.[0]?.payments?.captures?.[0]?.id ?? null) as string | null })
+const clip = (v: unknown): string => String(v).replace(/\s+/g, ' ').slice(0, 200)
+const messageOf = (v: unknown): string | null => {
+  if (typeof v === 'string' && v) return clip(v)
+  const m = (v as { message?: unknown } | null)?.message
+  return typeof m === 'string' && m ? clip(m) : null
+}
+
+/**
+ * Judge a pay_order (capture) result. The toolkit returns { status: 'success'|'error', response: <PayPal order JSON> };
+ * its run() also turns exceptions into { error: { message, type: 'paypal_error' } }. Only a fully COMPLETED capture of
+ * exactly the stored amount in USD counts as paid. `detail` is always a short, sanitised string (never the raw object).
+ */
+export function captureOf(r: any, expectedAmount: number): { ok: boolean; captureId: string | null; detail: string } {
+  if (r?.error) return { ok: false, captureId: null, detail: messageOf(r.error) ?? 'PayPal reported an error' }
+  if (r?.status === 'error') return { ok: false, captureId: null, detail: messageOf(r.response) ?? 'PayPal reported an error' }
+  const o = r?.response ?? r
+  const capture = o?.purchase_units?.[0]?.payments?.captures?.[0]
+  const captureId = typeof capture?.id === 'string' ? capture.id : null
+  if (o?.status !== 'COMPLETED') return { ok: false, captureId, detail: `order status ${clip(o?.status ?? 'unknown')}` }
+  if (capture?.status !== 'COMPLETED') return { ok: false, captureId, detail: `capture status ${clip(capture?.status ?? 'unknown')}` }
+  if (capture?.amount?.currency_code !== 'USD') return { ok: false, captureId, detail: `capture currency ${clip(capture?.amount?.currency_code ?? 'unknown')}` }
+  if (Number(capture?.amount?.value) !== roundMoney(expectedAmount)) return { ok: false, captureId, detail: `captured amount ${clip(capture?.amount?.value)} does not match the order amount ${roundMoney(expectedAmount)}` }
+  return { ok: true, captureId, detail: 'completed' }
+}
 const isGuardError = (e: unknown): e is PayPalGuardError => e instanceof PayPalGuardError || (e as Error)?.name === 'PayPalGuardError'
 
 const PAYABLE_STATUSES = ['agreed', 'notified', 'checkout_pending']
@@ -118,21 +141,18 @@ export async function captureOrder(paypalOrderId: string): Promise<Order> {
   if (row.status === 'completed') return orderOf(row)
   if (row.status !== 'created' && row.status !== 'failed') throw new CheckoutError('not_capturable', `An order in status "${row.status}" cannot be captured`)
 
-  let status: string | undefined
-  let captureId: string | null = null
-  let detail = ''
+  let captured: ReturnType<typeof captureOf>
   try {
     // pay_order captures; the checkout guard allows it unconditionally (the amount was fixed at creation).
-    const captured = captureOf(await callPayPalTool('pay_order', { id: paypalOrderId }, () => {}))
-    status = captured.status
-    captureId = captured.captureId
-    detail = `status ${status ?? 'unknown'}`
+    captured = captureOf(await callPayPalTool('pay_order', { id: paypalOrderId }, () => {}), Number(row.amount))
   } catch (e) {
-    detail = e instanceof Error ? e.message : 'unknown error'
-    console.warn('[checkout] pay_order failed:', e)
+    const message = e instanceof Error ? e.message : 'unknown error'
+    captured = { ok: false, captureId: null, detail: clip(message) }
+    console.warn('[checkout] pay_order failed:', message)
   }
+  const { captureId, detail } = captured
 
-  if (status !== 'COMPLETED') {
+  if (!captured.ok) {
     // The return URL and the webhook can race: the other caller may have captured the order while ours failed.
     // Re-read before declaring failure, and never overwrite a completed order.
     const latest = unwrap(await db().from('orders').select('*').eq('id', row.id).maybeSingle(), 'reload order') as Row | null

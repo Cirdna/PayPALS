@@ -10,7 +10,11 @@ const ENV_KEYS = ['APP_URL', 'PAYPAL_CLIENT_ID', 'PAYPAL_CLIENT_SECRET', 'PAYPAL
 const savedEnv: Record<string, string | undefined> = {}
 
 const ORDER_ID = 'ORDER1234567890ABC'
-const CAPTURE_RESULT = { id: ORDER_ID, status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ id: 'CAPTURE123' }] } }] }
+/** Real toolkit pay_order shape: { status: 'success', response: <PayPal order JSON> }. */
+const CAPTURE_RESULT = {
+  status: 'success',
+  response: { id: ORDER_ID, status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ id: 'CAPTURE123', status: 'COMPLETED', amount: { value: '262.00', currency_code: 'USD' } }] } }] },
+}
 const HEADERS = {
   'paypal-auth-algo': 'SHA256withRSA',
   'paypal-cert-url': 'https://api.sandbox.paypal.com/v1/notifications/certs/CERT-1',
@@ -192,7 +196,7 @@ describe('handlePayPalWebhook', () => {
   })
 
   it('capture failure (CheckoutError) is caught: no throw, order marked failed by captureOrder', async () => {
-    execute.mockImplementation(async () => JSON.stringify({ id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED' }))
+    execute.mockImplementation(async () => JSON.stringify({ status: 'success', response: { id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED' } }))
     await expect(handlePayPalWebhook(HEADERS, approvedEvent())).resolves.toBe('error')
     expect(fake.rows('orders')[0]!.status).toBe('failed')
   })
