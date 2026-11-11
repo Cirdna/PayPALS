@@ -6,6 +6,7 @@ import { setRawPayPalToolsForTests, buildCreateOrderInput } from '~~/server/lib/
 import { cancelOrder, captureOrder, CheckoutError, createCheckout } from '~~/server/lib/integrations/checkout'
 import { createFakeDb, type FakeDb } from '../helpers/fake-db'
 import { DEMO_USER_ID, seedTables } from '../helpers/seed-fixture'
+import { MockLanguageModelV4 } from 'ai/test'
 import { mockFailingModel, mockToolCallModel } from '../helpers/mock-model'
 
 process.env.APP_URL = 'https://app.test'
@@ -147,6 +148,123 @@ describe('createCheckout', () => {
   })
 })
 
+describe('createCheckout hardening', () => {
+  const buildInput = (over: Record<string, unknown> = {}) => ({ ...buildCreateOrderInput({ title: 'Sonaro WH-700 black, like new, with case', amount: 262, returnUrl: RETURN_URL, cancelUrl: CANCEL_URL }), ...over })
+  const createdInput = () => callsOf('create')[0]![0] as { returnUrl: string; cancelUrl: string }
+
+  it('M1. the model only sees create_order and must call it', async () => {
+    let seen: { tools?: { name: string }[]; toolChoice?: unknown } = {}
+    setModelForTests('fast', new MockLanguageModelV4({
+      doGenerate: async (opts: any) => {
+        seen = { tools: opts.tools, toolChoice: opts.toolChoice }
+        return {
+          content: [{ type: 'tool-call', toolCallId: 'c1', toolName: 'create_order', input: JSON.stringify(buildInput()) }],
+          finishReason: { unified: 'tool-calls', raw: 'tool-calls' },
+          usage: { inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 }, outputTokens: { total: 1, text: 1, reasoning: 0 } },
+          warnings: [],
+        }
+      },
+    } as never) as never)
+    await createCheckout('m1', DEMO_USER_ID)
+    expect(seen.tools?.map((t) => t.name)).toEqual(['create_order'])
+    expect(seen.toolChoice).toEqual({ type: 'tool', toolName: 'create_order' })
+  })
+
+  it('M1. a model that swaps returnUrl / cancelUrl is blocked by the guard; the fallback creates the correct order', async () => {
+    setModelForTests('fast', mockToolCallModel('create_order', buildInput({ returnUrl: 'https://evil.test/r', cancelUrl: 'https://evil.test/c' })))
+    const res = await createCheckout('m1', DEMO_USER_ID)
+    expect(res.paypalOrderId).toBe(ORDER_ID)
+    expect(callsOf('create')).toHaveLength(1)
+    expect(createdInput()).toMatchObject({ returnUrl: RETURN_URL, cancelUrl: CANCEL_URL })
+    expect(JSON.stringify(execute.mock.calls)).not.toContain('evil.test')
+  })
+
+  it('M1. a model that rewrites the item name is blocked the same way', async () => {
+    const base = buildInput()
+    setModelForTests('fast', mockToolCallModel('create_order', { ...base, items: [{ ...base.items[0]!, name: 'free money' }] }))
+    await createCheckout('m1', DEMO_USER_ID)
+    expect(JSON.stringify(execute.mock.calls)).not.toContain('free money')
+  })
+
+  it('M1. the prompt wraps the listing title as untrusted data', async () => {
+    let prompt = ''
+    setModelForTests('fast', new MockLanguageModelV4({
+      doGenerate: async (opts: any) => {
+        prompt = JSON.stringify(opts.prompt)
+        throw new Error('stop')
+      },
+    } as never) as never)
+    await createCheckout('m1', DEMO_USER_ID)
+    expect(prompt).toContain('untrusted_listing_title')
+  })
+
+  it('M4. rejects when the wishlist item is no longer active (not_allowed), no PayPal call', async () => {
+    await fake.from('wishlist_items').update({ status: 'fulfilled' }).eq('id', 'wl-headphones')
+    await expect(createCheckout('m1', DEMO_USER_ID)).rejects.toMatchObject({ code: 'not_allowed' })
+    expect(execute).not.toHaveBeenCalled()
+    expect(fake.rows('orders')).toHaveLength(0)
+  })
+
+  it('M4. two concurrent createCheckout calls create exactly ONE PayPal order', async () => {
+    const results = await Promise.allSettled([createCheckout('m1', DEMO_USER_ID), createCheckout('m1', DEMO_USER_ID)])
+    expect(callsOf('create')).toHaveLength(1)
+    expect(fake.rows('orders')).toHaveLength(1)
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+    const rejected = results.find((r) => r.status === 'rejected') as PromiseRejectedResult
+    expect(rejected.reason).toMatchObject({ code: 'checkout_in_progress', statusCode: 409 })
+    expect(fake.rows('matches')[0]!.status).toBe('checkout_pending')
+  })
+
+  it('M4. a match already checkout_pending without an open order is checkout_in_progress (409)', async () => {
+    await fake.from('matches').update({ status: 'checkout_pending' }).eq('id', 'm1')
+    await expect(createCheckout('m1', DEMO_USER_ID)).rejects.toMatchObject({ code: 'checkout_in_progress', statusCode: 409 })
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('M4. if PayPal order creation fails the previous match status is restored (agreed stays agreed)', async () => {
+    await fake.from('matches').update({ status: 'agreed' }).eq('id', 'm1')
+    execute.mockImplementation(async () => { throw new Error('paypal down') })
+    setModelForTests('fast', mockFailingModel())
+    await expect(createCheckout('m1', DEMO_USER_ID)).rejects.toMatchObject({ code: 'paypal_error', statusCode: 502 })
+    expect(fake.rows('matches')[0]!.status).toBe('agreed')
+    expect(fake.rows('orders')).toHaveLength(0)
+    // and the user can simply try again
+    execute.mockImplementation(async (input: unknown) => JSON.stringify(Array.isArray((input as { items?: unknown })?.items) ? CREATE_RESULT : captureBehaviour()))
+    await expect(createCheckout('m1', DEMO_USER_ID)).resolves.toMatchObject({ paypalOrderId: ORDER_ID })
+  })
+
+  it('L6. an amount above the wishlist max price is exceeds_max_price with a guardrail_blocked event', async () => {
+    await fake.from('wishlist_items').update({ max_price: 200 }).eq('id', 'wl-headphones')
+    await expect(createCheckout('m1', DEMO_USER_ID)).rejects.toMatchObject({ code: 'exceeds_max_price', statusCode: 409 })
+    expect(execute).not.toHaveBeenCalled()
+    expect(eventTypes()).toContain('guardrail_blocked')
+    expect(fake.rows('matches')[0]!.status).toBe('notified')
+  })
+
+  it('L7. an open order older than 2 hours is stale: cancelled, and a fresh order is created', async () => {
+    await createCheckout('m1', DEMO_USER_ID)
+    execute.mockClear()
+    const old = new Date(Date.now() - 3 * 3600_000).toISOString()
+    await fake.from('orders').update({ created_at: old }).eq('paypal_order_id', ORDER_ID)
+    await fake.from('orders').update({ paypal_order_id: 'OLD-ORDER' }).eq('paypal_order_id', ORDER_ID)
+    const res = await createCheckout('m1', DEMO_USER_ID)
+    expect(res.paypalOrderId).toBe(ORDER_ID)
+    expect(callsOf('create')).toHaveLength(1)
+    const orders = fake.rows('orders')
+    expect(orders).toHaveLength(2)
+    expect(orders.find((o) => o.paypal_order_id === 'OLD-ORDER')!.status).toBe('cancelled')
+    expect(orders.find((o) => o.paypal_order_id === ORDER_ID)!.status).toBe('created')
+    expect(fake.rows('matches')[0]!.status).toBe('checkout_pending')
+  })
+
+  it('L7. a recent open order is still returned as is', async () => {
+    const a = await createCheckout('m1', DEMO_USER_ID)
+    fake.advance(3600_000)
+    const b = await createCheckout('m1', DEMO_USER_ID)
+    expect(b).toEqual(a)
+  })
+})
+
 describe('captureOrder', () => {
   beforeEach(async () => { await createCheckout('m1', DEMO_USER_ID); execute.mockClear() })
 
@@ -251,6 +369,13 @@ describe('captureOrder', () => {
     await expect(captureOrder(ORDER_ID)).resolves.toMatchObject({ status: 'completed' })
     expect(fake.rows('orders')[0]!.status).toBe('completed')
     expect(eventTypes()).not.toContain('order_failed')
+  })
+
+  it('M4. a match that is already purchased refuses a second capture without calling PayPal', async () => {
+    await fake.from('matches').update({ status: 'purchased' }).eq('id', 'm1')
+    await expect(captureOrder(ORDER_ID)).rejects.toMatchObject({ code: 'already_purchased' })
+    expect(execute).not.toHaveBeenCalled()
+    expect(fake.rows('orders')[0]!.status).toBe('created')
   })
 
   it('10. unknown order: not_found 404', async () => {

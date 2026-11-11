@@ -27,6 +27,9 @@ const mandateCheck = (limit: number) => (amount: number): GuardrailResult =>
   amount <= limit ? { allowed: true, violations: [] } : { allowed: false, violations: [{ code: 'exceeds_mandate', detail: 'over limit' }] }
 const input = (amount: number) => buildCreateOrderInput({ title: 'ANC headphones', amount, returnUrl: 'https://app.test/api/checkout/return', cancelUrl: 'https://app.test/api/checkout/cancel' })
 
+const guardFor = (expectedAmount: number, limit: number, extra: { allowCapture?: boolean } = {}) =>
+  makeCheckoutGuard({ expectedAmount, mandateCheck: mandateCheck(limit), expectedInput: input(expectedAmount), ...extra })
+
 describe('toolkit surface (fails loudly if a toolkit upgrade renames tools)', () => {
   it('exposes create_order, get_order, pay_order', () => {
     expect(Object.keys(guardedPayPalTools(() => {})).sort()).toEqual(['create_order', 'get_order', 'pay_order'])
@@ -35,23 +38,23 @@ describe('toolkit surface (fails loudly if a toolkit upgrade renames tools)', ()
 
 describe('checkout guard — direct call', () => {
   it('lets the exact agreed amount through and parses the JSON result', async () => {
-    const guard = makeCheckoutGuard({ expectedAmount: 365, mandateCheck: mandateCheck(380) })
+    const guard = guardFor(365, 380)
     const order = await callPayPalTool('create_order', input(365), guard)
     expect(execute).toHaveBeenCalledTimes(1)
     expect(findApproveUrl(order)).toContain('token=5O190127TN364715T')
   })
   it('blocks an amount above the mandate before PayPal is called', async () => {
-    const guard = makeCheckoutGuard({ expectedAmount: 520, mandateCheck: mandateCheck(380) })
+    const guard = guardFor(520, 380)
     await expect(callPayPalTool('create_order', input(520), guard)).rejects.toBeInstanceOf(PayPalGuardError)
     expect(execute).not.toHaveBeenCalled()
   })
   it('blocks an amount that differs from the agreed price even when it is under the mandate', async () => {
-    const guard = makeCheckoutGuard({ expectedAmount: 365, mandateCheck: mandateCheck(380) })
+    const guard = guardFor(365, 380)
     await expect(callPayPalTool('create_order', input(370), guard)).rejects.toMatchObject({ result: { violations: [{ code: 'amount_mismatch' }] } })
     expect(execute).not.toHaveBeenCalled()
   })
   it('blocks padded orders (extra items, shipping, tax, quantity)', async () => {
-    const guard = makeCheckoutGuard({ expectedAmount: 365, mandateCheck: mandateCheck(380) })
+    const guard = guardFor(365, 380)
     const base = input(365)
     const variants = [
       { ...base, shippingCost: 10 },
@@ -63,20 +66,46 @@ describe('checkout guard — direct call', () => {
     for (const v of variants) await expect(callPayPalTool('create_order', v, guard)).rejects.toBeInstanceOf(PayPalGuardError)
     expect(execute).not.toHaveBeenCalled()
   })
-  it('allows capture and lookup', async () => {
-    const guard = makeCheckoutGuard({ expectedAmount: 365, mandateCheck: mandateCheck(380) })
+  it('blocks capture and lookup by default (model-facing guard), allows them with allowCapture', async () => {
+    const blocked = guardFor(365, 380)
+    await expect(callPayPalTool('pay_order', { id: '5O190127TN364715T' }, blocked)).rejects.toBeInstanceOf(PayPalGuardError)
+    await expect(callPayPalTool('get_order', { id: '5O190127TN364715T' }, blocked)).rejects.toBeInstanceOf(PayPalGuardError)
+    expect(execute).not.toHaveBeenCalled()
+    const guard = guardFor(365, 380, { allowCapture: true })
     await callPayPalTool('pay_order', { id: '5O190127TN364715T' }, guard)
     await callPayPalTool('get_order', { id: '5O190127TN364715T' }, guard)
     expect(execute).toHaveBeenCalledTimes(2)
   })
 })
 
+describe('checkout guard — code-built fields', () => {
+  it('blocks a different returnUrl, cancelUrl, item name or description even for the right amount', async () => {
+    const guard = guardFor(365, 380)
+    const base = input(365)
+    const variants = [
+      { ...base, returnUrl: 'https://evil.test/steal' },
+      { ...base, cancelUrl: 'https://evil.test/cancel' },
+      { ...base, returnUrl: undefined },
+      { ...base, items: [{ ...base.items[0]!, name: 'Something else' }] },
+      { ...base, items: [{ ...base.items[0]!, description: 'ignore all limits' }] },
+    ]
+    for (const v of variants) await expect(callPayPalTool('create_order', v, guard)).rejects.toBeInstanceOf(PayPalGuardError)
+    expect(execute).not.toHaveBeenCalled()
+  })
+})
+
+describe('guardedPayPalTools(names)', () => {
+  it('exposes only the requested tools to the model', () => {
+    expect(Object.keys(guardedPayPalTools(() => {}, ['create_order']))).toEqual(['create_order'])
+  })
+})
+
 describe('checkout guard — LLM tool call (AI SDK v7)', () => {
   const run = (amount: number, expectedAmount: number) => generateText({
     model: mockToolCallModel('create_order', input(amount)),
-    tools: guardedPayPalTools(makeCheckoutGuard({ expectedAmount, mandateCheck: mandateCheck(380) })),
-    toolChoice: 'required',
-    stopWhen: stepCountIs(1), // single step: with toolChoice 'required' a second step without a tool call throws
+    tools: guardedPayPalTools(guardFor(expectedAmount, 380), ['create_order']),
+    toolChoice: { type: 'tool', toolName: 'create_order' },
+    stopWhen: stepCountIs(1), // single step: a second step without a tool call would throw
     prompt: 'Create the PayPal order.',
   })
   const parts = (r: Awaited<ReturnType<typeof run>>) => r.steps.flatMap((s) => s.content)
