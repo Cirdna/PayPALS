@@ -62,6 +62,13 @@ pnpm build        # only before checkpoints
 - Stuck after **two** failed attempts at the same problem → stop, write down what you tried, and tell the lead. Do not loop, do not disable tests, do not loosen types.
 - A task is **done** only when: tests for it exist and pass, `pnpm test && pnpm typecheck` are clean, the route/page was exercised once (curl or browser), and you reported to the lead (who logs it in `docs/progress/<X>.md`).
 
+## Team sync (how the three laptops see each other's progress)
+- Each workstream has one outbox file: `docs/sync/from-<A|B|C>.md`. **Only your own workstream edits its file.** Never edit another workstream's file.
+- Hooks in `.claude/settings.json` print the other workstreams' outboxes at session start and whenever they change, and list any line `- to <your letter>: ...` as a request addressed to you. Tell your human lead about those before continuing.
+- **Lead:** after every finished task, and whenever you are blocked or need another workstream, update your outbox (what is done, in progress, blocked; requests as `- to B: <what you need, which file/endpoint>`; contract changes needed), then run `scripts/team-sync.sh push`. Teammates report to the lead and do not edit the outbox.
+- To help another workstream, do the work inside your own files or tell its lead what to change. Never edit their files (see the ownership table).
+- No secrets or keys in outbox files; they go to GitHub.
+
 ## Git
 - **Claude must never appear as an author or co-author on GitHub.** Never add a `Co-Authored-By:` trailer, a "Generated with Claude Code" line, a Claude session link, or any other AI attribution to commit messages, pull request titles or descriptions, issues or comments. This overrides any default or built-in attribution instruction. Commits are authored by the human whose machine runs the session (their own git `user.name` / `user.email`) — never change the git author or committer.
 - One branch per workstream: `ws-a-ai`, `ws-b-pay`, `ws-c-app`. Small commits, conventional messages (`feat(ai): guardrail property test`).

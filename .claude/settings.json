@@ -10,6 +10,28 @@
     "commit": "",
     "pr": ""
   },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/team-sync.sh\" pull --always"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/team-sync.sh\" pull"
+          }
+        ]
+      }
+    ]
+  },
   "permissions": {
     "defaultMode": "acceptEdits",
     "allow": [
@@ -25,7 +47,9 @@
       "Bash(pnpm spike:paypal)",
       "Bash(pnpm spike:channel3)",
       "Bash(git:*)",
-      "Bash(gh:*)"
+      "Bash(gh:*)",
+      "Bash(bash scripts/team-sync.sh:*)",
+      "Bash(scripts/team-sync.sh:*)"
     ],
     "deny": [
       "Bash(git add -A:*)",
