@@ -8,8 +8,9 @@
  *   pnpm exec tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/local-e2e-spike.ts
  *
  * Safety: aborts unless SUPABASE_URL is http://127.0.0.1|localhost:55321. Global fetch is stubbed: api.telegram.org
- * calls are recorded (and answered { ok: true, result: {} }), the local Supabase API is passed through, anything
- * else throws. No real model, no PayPal, no Channel3, no Telegram.
+ * calls are recorded (and answered { ok: true, result: {} }), api-m.sandbox.paypal.com answers ONLY the two webhook
+ * verification calls (OAuth token, verify-webhook-signature) with canned bodies, the local Supabase API is passed
+ * through, anything else throws. No real model, no PayPal, no Channel3, no Telegram.
  *
  * It loads supabase/seed/data.json into the local DB under two throw-away users (e2e-b-demo@, e2e-b-other@) and the
  * seed's seller slugs, deleting its own rows first, so it is idempotent. It is only B's check, not the official seed.
@@ -26,6 +27,7 @@ import { env } from '~~/server/lib/env'
 import { setChannel3ClientForTests } from '~~/server/lib/integrations/channel3'
 import { cancelOrder, captureOrder, CheckoutError, createCheckout } from '~~/server/lib/integrations/checkout'
 import { notifyDeal } from '~~/server/lib/integrations/notify'
+import { handlePayPalWebhook } from '~~/server/lib/integrations/paypal-webhook'
 import { buildCreateOrderInput, setRawPayPalToolsForTests } from '~~/server/lib/integrations/paypal-toolkit'
 import { runScan } from '~~/server/lib/integrations/scan'
 import { handleUpdate } from '~~/server/lib/integrations/telegram'
@@ -52,9 +54,17 @@ for (const k of ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET', 'PAYPAL_CLIENT
 process.env.APP_URL ||= 'http://localhost:3000'
 
 const telegram: { method: string; body: Row }[] = []
+const paypalHttp: string[] = [] // pathnames of the (stubbed) calls to the PayPal sandbox host
+let verifyStatus = 'SUCCESS'
 const realFetch = globalThis.fetch
 globalThis.fetch = (async (input: any, init?: any) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
+  if (url.hostname === 'api-m.sandbox.paypal.com') {
+    paypalHttp.push(url.pathname)
+    if (url.pathname === '/v1/oauth2/token') return new Response(JSON.stringify({ access_token: 'x' }), { status: 200 })
+    if (url.pathname === '/v1/notifications/verify-webhook-signature') return new Response(JSON.stringify({ verification_status: verifyStatus }), { status: 200 })
+    throw new Error(`e2e: blocked PayPal sandbox request to ${url.pathname}`)
+  }
   if (url.hostname === 'api.telegram.org') {
     telegram.push({ method: url.pathname.split('/').pop() ?? '', body: JSON.parse(init?.body ?? '{}') })
     return new Response(JSON.stringify({ ok: true, result: {} }), { status: 200 })
@@ -82,9 +92,9 @@ function check(name: string, ok: boolean, detail?: unknown): void {
 }
 const eq = (name: string, actual: unknown, expected: unknown) =>
   check(name, JSON.stringify(actual) === JSON.stringify(expected), `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
-/** Swallowed errors in B's code surface as console.warn: any [scan]/[notify]/[telegram]/[checkout]/[events]/[channel3] line is a finding. */
+/** Swallowed errors in B's code surface as console.warn: any [scan]/[notify]/[telegram]/[checkout]/[events]/[channel3]/[paypal-webhook] line is a finding. */
 function noUnexpectedWarnings(label: string, allow: RegExp[] = []): void {
-  const bad = warnings.filter((w) => /^\[(scan|notify|telegram|checkout|events|channel3)\]/.test(w) && !allow.some((a) => a.test(w)))
+  const bad = warnings.filter((w) => /^\[(scan|notify|telegram|checkout|events|channel3|paypal-webhook)\]/.test(w) && !allow.some((a) => a.test(w)))
   check(`${label}: no swallowed errors logged by B's code`, bad.length === 0, bad)
   warnings.length = 0
 }
@@ -118,6 +128,7 @@ async function cleanup(): Promise<void> {
   // sellers cascade to personas, listings, secrets, matches (and their negotiations/orders)
   await must(db().from('sellers').delete().in('slug', seed.sellers.map((s) => s.slug)).select(), 'delete sellers')
   await must(db().from('listings').delete().eq('source', 'channel3').eq('external_id', C3_ID).select(), 'delete channel3 listing')
+  await must(db().from('webhook_events').delete().like('id', 'E2E-%').select(), 'delete e2e webhook events') // event ids are global, a re-run must not see "duplicate"
 }
 
 async function createUser(email: string, name: string): Promise<string> {
@@ -191,6 +202,8 @@ let orderSeq = 0
 let createCalls = 0
 let payCalls = 0
 const orderAmounts = new Map<string, number>()
+/** What the stubbed pay_order (capture) returns: a correct capture, a different amount, a non-USD capture, or the toolkit's error shape. */
+let captureMode: 'ok' | 'wrong_amount' | 'wrong_currency' | 'error' = 'ok'
 function mockPayPal(): void {
   const toolkit = new PayPalAgentToolkit({
     clientId: 'test', clientSecret: 'test',
@@ -200,13 +213,17 @@ function mockPayPal(): void {
   const execute = async (input: any) => {
     if (Array.isArray(input?.items)) {
       createCalls++
+      await new Promise((r) => setTimeout(r, 40)) // widen the window so concurrent createCheckout calls really overlap
       const id = `E2EORDER${String(++orderSeq).padStart(9, '0')}`
       orderAmounts.set(id, input.items[0].itemTotal)
       return JSON.stringify({ id, status: 'PAYER_ACTION_REQUIRED', links: [{ rel: 'payer-action', href: `https://www.sandbox.paypal.com/checkoutnow?token=${id}` }] })
     }
     payCalls++
+    if (captureMode === 'error') return JSON.stringify({ error: { message: 'e2e simulated PayPal failure', type: 'paypal_error' } })
+    const paid = (orderAmounts.get(input.id) ?? 0) + (captureMode === 'wrong_amount' ? 1 : 0)
+    const currency = captureMode === 'wrong_currency' ? 'EUR' : 'USD'
     // toolkit shape: { status: 'success', response: <PayPal order JSON> }
-    return JSON.stringify({ status: 'success', response: { id: input.id, status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ id: `CAPTURE${input.id}`, status: 'COMPLETED', amount: { currency_code: 'USD', value: (orderAmounts.get(input.id) ?? 0).toFixed(2) } }] } }] } })
+    return JSON.stringify({ status: 'success', response: { id: input.id, status: 'COMPLETED', purchase_units: [{ payments: { captures: [{ id: `CAPTURE${input.id}`, status: 'COMPLETED', amount: { currency_code: currency, value: paid.toFixed(2) } }] } }] } })
   }
   for (const t of Object.values(tools)) t.execute = execute
   setRawPayPalToolsForTests(tools as never)
@@ -223,6 +240,10 @@ const eventsOf = async (type: string, matchId?: string) => {
   return matchId ? rows.filter((r) => r.match_id === matchId) : rows
 }
 const tgCalls = (method: string) => telegram.filter((t) => t.method === method)
+const HP = 'wl-headphones'
+const setItemActive = async (key = HP) => { await must(db().from('wishlist_items').update({ status: 'active' }).eq('id', ids.wishlist[key]!).select(), 'activate item') }
+const itemStatus = async (key = HP) => ((await must(db().from('wishlist_items').select('status').eq('id', ids.wishlist[key]!).single(), 'item')) as Row).status as string
+const setMandate = async (maxAmount: number, key = HP) => { await must(db().from('mandates').update({ max_amount: maxAmount }).eq('wishlist_item_id', ids.wishlist[key]!).select(), 'set mandate') }
 const scanItem = (key: string) => runScan({ wishlistItemId: ids.wishlist[key], userId: ids.user, isCron: false })
 
 // ───────────────────────── scenarios ─────────────────────────
@@ -411,6 +432,8 @@ async function scenarioF(): Promise<void> {
   check('Telegram receipt sent to the linked chat', tgCalls('sendMessage').some((t) => t.body.chat_id === DEMO_CHAT && String(t.body.text).includes('Paid')), tgCalls('sendMessage').map((t) => t.body.text))
   const again2 = await captureOrder(co.paypalOrderId)
   check('second captureOrder is idempotent (no PayPal call)', again2.status === 'completed' && payCalls - p0 === 1, again2)
+  // the first captured purchase fulfilled the item; checkout refuses non-active items, so later scenarios reactivate it
+  await setItemActive()
 
   // cancel path on another match (deterministic fallback: model fails)
   setModelForTests('fast', mockFailingModel())
@@ -432,6 +455,7 @@ async function scenarioG(): Promise<void> {
   section('(g) mandate lowered below the price blocks checkout, PayPal untouched')
   const techdad = await matchOf('hp-used-techdad')
   eq('precondition: techdad match is notified at 268', [techdad.status, Number(techdad.best_price)], ['notified', 268])
+  await setItemActive()
   await must(db().from('mandates').update({ max_amount: 200 }).eq('wishlist_item_id', ids.wishlist['wl-headphones']!).select(), 'lower mandate')
   const c0 = createCalls
   const err = await createCheckout(techdad.id, ids.user).catch((e) => e)
@@ -440,6 +464,7 @@ async function scenarioG(): Promise<void> {
   eq('no order row', (await ordersOf(techdad.id)).length, 0)
   eq('match status unchanged', (await matchById(techdad.id)).status, 'notified')
   eq('guardrail_blocked event logged', (await eventsOf('guardrail_blocked', techdad.id)).length, 1)
+  await setMandate(300) // restore the seed's mandate for the scenarios below
   noUnexpectedWarnings('(g)')
 }
 
@@ -447,40 +472,67 @@ async function scenarioH(): Promise<void> {
   section('(h) Telegram handleUpdate')
   await must(db().from('profiles').update({ telegram_chat_id: null }).eq('id', ids.user).select(), 'unlink')
   const profileOf = async (id: string) => await must(db().from('profiles').select('*').eq('id', id).single(), 'profile') as Row
+  const priv = (id: number) => ({ id, type: 'private' })
+  const privCb = (cqId: string, data: string, chat: number) => ({ callback_query: { id: cqId, data, from: { id: chat }, message: { chat: priv(chat) } } })
 
   telegram.length = 0
-  await handleUpdate({ message: { text: '/start wrong-token', chat: { id: 555111 } } })
+  await handleUpdate({ message: { text: '/start wrong-token', chat: priv(555111), from: { id: 555111 } } })
   eq('/start with an unknown token links nothing', (await profileOf(ids.user)).telegram_chat_id, null)
   check('and answers with the "open Settings" hint', tgCalls('sendMessage').length === 1 && String(tgCalls('sendMessage')[0]!.body.text).includes('Settings'))
 
+  // a link token pasted into a group chat must not link anything (and must not be consumed)
   telegram.length = 0
-  await handleUpdate({ message: { text: `/start ${DEMO_TOKEN}`, chat: { id: DEMO_CHAT } } })
-  eq('/start <token> links the chat (bigint column, number round trip)', (await profileOf(ids.user)).telegram_chat_id, DEMO_CHAT)
+  await handleUpdate({ message: { text: `/start ${DEMO_TOKEN}`, chat: { id: -100123456, type: 'group' }, from: { id: DEMO_CHAT } } })
+  const afterGroup = await profileOf(ids.user)
+  check('/start <valid token> from a group chat links nothing and keeps the token', afterGroup.telegram_chat_id === null && afterGroup.telegram_link_token === DEMO_TOKEN, afterGroup)
+  check('group chat is told to use a private chat', tgCalls('sendMessage').length === 1 && String(tgCalls('sendMessage')[0]!.body.text).includes('private'), tgCalls('sendMessage').map((t) => t.body))
+
+  telegram.length = 0
+  await handleUpdate({ message: { text: `/start ${DEMO_TOKEN}`, chat: priv(DEMO_CHAT), from: { id: DEMO_CHAT } } })
+  const linked = await profileOf(ids.user)
+  eq('/start <token> in a private chat links the chat (bigint column, number round trip)', linked.telegram_chat_id, DEMO_CHAT)
   check('confirmation sent to that chat', tgCalls('sendMessage').length === 1 && tgCalls('sendMessage')[0]!.body.chat_id === DEMO_CHAT)
+  check('link token rotated: new 24-hex value, different from the old one', typeof linked.telegram_link_token === 'string' && /^[0-9a-f]{24}$/.test(linked.telegram_link_token) && linked.telegram_link_token !== DEMO_TOKEN, linked.telegram_link_token)
   eq("the other user's chat link is untouched", (await profileOf(ids.other)).telegram_chat_id, OTHER_CHAT)
+
+  // replaying the old token from another private chat links nothing
+  telegram.length = 0
+  await handleUpdate({ message: { text: `/start ${DEMO_TOKEN}`, chat: priv(424242), from: { id: 424242 } } })
+  const afterReplay = await profileOf(ids.user)
+  check('replaying the old token from another chat changes nothing (chat id and token as before)', afterReplay.telegram_chat_id === DEMO_CHAT && afterReplay.telegram_link_token === linked.telegram_link_token, afterReplay)
+  check('and the replay gets the "open Settings" hint', tgCalls('sendMessage').length === 1 && String(tgCalls('sendMessage')[0]!.body.text).includes('Settings'))
 
   const techdad = await matchOf('hp-used-techdad')
   const o0 = (await ordersOf(techdad.id)).length
   const c0 = createCalls
   telegram.length = 0
-  await handleUpdate({ callback_query: { id: 'cq1', data: `skip:${techdad.id}`, message: { chat: { id: OTHER_CHAT } } } })
+  await handleUpdate(privCb('cq1', `skip:${techdad.id}`, OTHER_CHAT))
   eq('skip from a foreign (linked to another user) chat changes nothing', (await matchById(techdad.id)).status, 'notified')
   check('answered "Deal not found"', tgCalls('answerCallbackQuery').length === 1 && String(tgCalls('answerCallbackQuery')[0]!.body.text).includes('not found'), tgCalls('answerCallbackQuery').map((t) => t.body))
-  await handleUpdate({ callback_query: { id: 'cq2', data: `skip:${techdad.id}`, message: { chat: { id: 123456789 } } } })
+  await handleUpdate(privCb('cq2', `skip:${techdad.id}`, 123456789))
   eq('skip from an unlinked chat changes nothing', (await matchById(techdad.id)).status, 'notified')
-  await handleUpdate({ callback_query: { id: 'cq3', data: `pay:${techdad.id}`, message: { chat: { id: OTHER_CHAT } } } })
+  await handleUpdate(privCb('cq3', `pay:${techdad.id}`, OTHER_CHAT))
   check('pay from a foreign chat creates no order and calls no PayPal', (await ordersOf(techdad.id)).length === o0 && createCalls === c0)
 
+  // callbacks from a group chat, or where the pressing user is not the chat, are refused before any lookup
   telegram.length = 0
-  await handleUpdate({ callback_query: { id: 'cq4', data: `skip:${techdad.id}`, message: { chat: { id: DEMO_CHAT } } } })
-  eq('skip from the owner chat marks the match skipped', (await matchById(techdad.id)).status, 'skipped')
+  await handleUpdate({ callback_query: { id: 'cq-g1', data: `skip:${techdad.id}`, from: { id: DEMO_CHAT }, message: { chat: { id: DEMO_CHAT, type: 'group' } } } })
+  await handleUpdate({ callback_query: { id: 'cq-g2', data: `pay:${techdad.id}`, from: { id: DEMO_CHAT }, message: { chat: { id: DEMO_CHAT, type: 'supergroup' } } } })
+  await handleUpdate({ callback_query: { id: 'cq-g3', data: `skip:${techdad.id}`, from: { id: 31337 }, message: { chat: priv(DEMO_CHAT) } } })
+  eq('group / supergroup / from-id-mismatch callbacks from the OWNER chat id change nothing', (await matchById(techdad.id)).status, 'notified')
+  check('they create no order and call no PayPal', (await ordersOf(techdad.id)).length === o0 && createCalls === c0)
+  check('each is answered with the private-chat hint', tgCalls('answerCallbackQuery').length === 3 && tgCalls('answerCallbackQuery').every((t) => String(t.body.text).includes('private chat')), tgCalls('answerCallbackQuery').map((t) => t.body))
+
+  telegram.length = 0
+  await handleUpdate(privCb('cq4', `skip:${techdad.id}`, DEMO_CHAT))
+  eq('skip from the owner (private) chat marks the match skipped', (await matchById(techdad.id)).status, 'skipped')
 
   // pay: from the owner chat for the match that has an open order -> returns the approve link
   telegram.length = 0
   const gf = await matchOf('hp-used-gadgetflip')
   const open = (await ordersOf(gf.id)).find((o) => o.status === 'created')!
-  await handleUpdate({ callback_query: { id: 'cq5', data: `pay:${gf.id}`, message: { chat: { id: DEMO_CHAT } } } })
-  check('pay from the owner chat answers with the PayPal approve link', JSON.stringify(tgCalls('sendMessage').at(-1)?.body.reply_markup ?? '').includes(open.approve_url), tgCalls('sendMessage').map((t) => t.body))
+  await handleUpdate(privCb('cq5', `pay:${gf.id}`, DEMO_CHAT))
+  check('pay from the owner chat answers with the PayPal approve link', JSON.stringify(tgCalls('sendMessage').at(-1)?.body.reply_markup ?? '').includes(open?.approve_url ?? 'no-open-order'), tgCalls('sendMessage').map((t) => t.body))
   noUnexpectedWarnings('(h)')
 }
 
@@ -500,6 +552,197 @@ async function scenarioI(): Promise<void> {
   noUnexpectedWarnings('(i)')
 }
 
+// ───────────────────────── checkout / webhook scenarios (j)-(n) ─────────────────────────
+
+/** Put a headphones match into a payable state: item active, seed mandate, match `notified` at `price`. */
+async function prepMatch(listingKey: string, price: number, o: { activate?: boolean; mandate?: number } = {}): Promise<Row> {
+  if (o.activate !== false) await setItemActive()
+  await setMandate(o.mandate ?? 300)
+  const m = await matchOf(listingKey)
+  await must(db().from('matches').update({ status: 'notified', best_price: price }).eq('id', m.id).select(), 'prep match')
+  return m
+}
+const titleOf = (key: string) => seed.listings.find((l) => l.key === key)!.title
+const createInput = (key: string, amount: number) => buildCreateOrderInput({ title: titleOf(key), amount, returnUrl: `${env.appUrl}/api/checkout/return`, cancelUrl: `${env.appUrl}/api/checkout/cancel` })
+const orderRow = async (paypalOrderId: string) => (await must(db().from('orders').select('*').eq('paypal_order_id', paypalOrderId), 'order') as Row[])[0]!
+const webhookRows = async (id: string) => await must(db().from('webhook_events').select('*').eq('id', id), 'webhook_events') as Row[]
+const FALLBACK_WARN = /^\[checkout\] agent path failed, using direct call: mock model failure/ // expected whenever a checkout runs with the failing model
+
+async function scenarioJ(): Promise<void> {
+  section('(j) three concurrent createCheckout on one match: atomic claim, one PayPal order')
+  const m = await prepMatch('hp-used-techdad', 268)
+  setModelForTests('fast', mockToolCallModel('create_order', createInput('hp-used-techdad', 268)))
+  const c0 = createCalls
+  const results = await Promise.allSettled([createCheckout(m.id, ids.user), createCheckout(m.id, ids.user), createCheckout(m.id, ids.user)])
+  const orders = await ordersOf(m.id)
+  eq('exactly one orders row', orders.length, 1)
+  eq('PayPal create_order stub called once', createCalls - c0, 1)
+  const ok = results.filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof createCheckout>>> => r.status === 'fulfilled')
+  const bad = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+  check('at least one caller got the order, and every winner got the one real order', ok.length >= 1 && ok.every((r) => r.value.paypalOrderId === orders[0]?.paypal_order_id), results.map((r) => (r.status === 'fulfilled' ? r.value.paypalOrderId : String(r.reason?.code ?? r.reason))))
+  check('every loser failed with CheckoutError checkout_in_progress', bad.every((r) => r.reason instanceof CheckoutError && r.reason.code === 'checkout_in_progress' && r.reason.statusCode === 409), bad.map((r) => String(r.reason?.code ?? r.reason)))
+  eq('match -> checkout_pending (claim held)', (await matchById(m.id)).status, 'checkout_pending')
+  eq('one order_created event', (await eventsOf('order_created', m.id)).length, 1)
+  noUnexpectedWarnings('(j)')
+
+  section('(j2) an open order older than 2 hours is cancelled and replaced')
+  setModelForTests('fast', mockFailingModel())
+  const sm = await prepMatch('hp-store-sonaro', 280)
+  const first = await createCheckout(sm.id, ids.user)
+  await must(db().from('orders').update({ created_at: new Date(Date.now() - 3 * 3_600_000).toISOString() }).eq('paypal_order_id', first.paypalOrderId).select(), 'age order')
+  const second = await createCheckout(sm.id, ids.user)
+  const rows = await ordersOf(sm.id)
+  check('new order with a different PayPal id', second.paypalOrderId !== first.paypalOrderId && second.orderId !== first.orderId, [first.paypalOrderId, second.paypalOrderId])
+  eq('statuses [stale, fresh] = [cancelled, created]', rows.map((r) => r.status), ['cancelled', 'created'])
+  eq('match -> checkout_pending again', (await matchById(sm.id)).status, 'checkout_pending')
+  noUnexpectedWarnings('(j2)', [FALLBACK_WARN])
+}
+
+async function scenarioK(): Promise<void> {
+  section('(k) PayPal webhook: verification, event claim in webhook_events, retry after a failed capture')
+  const saved = { id: process.env.PAYPAL_WEBHOOK_ID, base: process.env.PAYPAL_API_BASE }
+  const headers = {
+    'paypal-auth-algo': 'SHA256withRSA', 'paypal-cert-url': 'https://api.sandbox.paypal.com/v1/notifications/certs/CERT-E2E',
+    'paypal-transmission-id': 'e2e-tx', 'paypal-transmission-sig': 'e2e-sig', 'paypal-transmission-time': '2026-11-12T00:00:00Z',
+  }
+  const approved = (eventId: string, orderId: string) => JSON.stringify({ id: eventId, event_type: 'CHECKOUT.ORDER.APPROVED', resource: { id: orderId, status: 'APPROVED' } })
+  try {
+    process.env.PAYPAL_WEBHOOK_ID = 'e2e-webhook-id'
+    process.env.PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com'
+    setModelForTests('fast', mockFailingModel())
+
+    // guards before anything is verified
+    paypalHttp.length = 0
+    const techdad = await matchOf('hp-used-techdad')
+    const tdOrder = (await ordersOf(techdad.id))[0]!
+    delete process.env.PAYPAL_WEBHOOK_ID
+    eq('no PAYPAL_WEBHOOK_ID -> ignored, PayPal never contacted', [await handlePayPalWebhook(headers, approved('E2E-WH-APPROVED', tdOrder.paypal_order_id)), paypalHttp.length], ['ignored', 0])
+    process.env.PAYPAL_WEBHOOK_ID = 'e2e-webhook-id'
+    process.env.PAYPAL_API_BASE = 'https://api-m.paypal.com'
+    eq('non-sandbox PAYPAL_API_BASE host -> ignored, PayPal never contacted', [await handlePayPalWebhook(headers, approved('E2E-WH-APPROVED', tdOrder.paypal_order_id)), paypalHttp.length], ['ignored', 0])
+    process.env.PAYPAL_API_BASE = 'https://api-m.sandbox.paypal.com'
+    eq('no webhook_events row left behind by the ignored deliveries', (await webhookRows('E2E-WH-APPROVED')).length, 0)
+
+    // APPROVED delivered twice
+    const p0 = payCalls
+    paypalHttp.length = 0
+    const body = approved('E2E-WH-APPROVED', tdOrder.paypal_order_id)
+    const first = await handlePayPalWebhook(headers, body)
+    eq('verification used the OAuth token call then verify-webhook-signature', paypalHttp, ['/v1/oauth2/token', '/v1/notifications/verify-webhook-signature'])
+    const second = await handlePayPalWebhook(headers, body)
+    eq('first delivery captured, second delivery duplicate', [first, second], ['captured', 'duplicate'])
+    eq('PayPal capture (pay_order) ran exactly once', payCalls - p0, 1)
+    const tdAfter = await orderRow(tdOrder.paypal_order_id)
+    check('order completed with capture_id', tdAfter.status === 'completed' && tdAfter.capture_id === `CAPTURE${tdOrder.paypal_order_id}`, tdAfter)
+    eq('match -> purchased', (await matchById(techdad.id)).status, 'purchased')
+    eq('exactly one webhook_events row for the event id', (await webhookRows('E2E-WH-APPROVED')).map((r) => [r.id, r.type]), [['E2E-WH-APPROVED', 'CHECKOUT.ORDER.APPROVED']])
+    eq('one order_captured event', (await eventsOf('order_captured', techdad.id)).length, 1)
+
+    // capture fails: the event claim is released, the retry of the SAME event id captures
+    const gf = await matchOf('hp-used-gadgetflip')
+    const gfOrder = (await ordersOf(gf.id)).find((o) => o.status === 'created')!
+    check('precondition: gadgetflip has an open order and is checkout_pending', !!gfOrder && gf.status === 'checkout_pending', [gfOrder?.status, gf.status])
+    const gfBody = approved('E2E-WH-FAIL', gfOrder.paypal_order_id)
+    captureMode = 'error'
+    const failed = await handlePayPalWebhook(headers, gfBody)
+    eq("capture failure -> outcome 'error'", failed, 'error')
+    eq('the webhook_events claim row was released again', (await webhookRows('E2E-WH-FAIL')).length, 0)
+    eq('order marked failed, match not purchased', [(await orderRow(gfOrder.paypal_order_id)).status, (await matchById(gf.id)).status], ['failed', 'checkout_pending'])
+    captureMode = 'ok'
+    const retry = await handlePayPalWebhook(headers, gfBody)
+    eq('retry of the same event id -> captured', retry, 'captured')
+    eq('order completed and match purchased after the retry', [(await orderRow(gfOrder.paypal_order_id)).status, (await matchById(gf.id)).status], ['completed', 'purchased'])
+    eq('claim row present again (processed)', (await webhookRows('E2E-WH-FAIL')).length, 1)
+
+    // bad signature: nothing captured, nothing claimed
+    const sm = await matchOf('hp-store-sonaro') // (j2) left it checkout_pending with an open order
+    const smOrder = (await ordersOf(sm.id)).find((o) => o.status === 'created')!
+    check('precondition: sonaro match has an open order', !!smOrder)
+    const p1 = payCalls
+    verifyStatus = 'FAILURE'
+    const bad = await handlePayPalWebhook(headers, approved('E2E-WH-BAD', smOrder.paypal_order_id))
+    verifyStatus = 'SUCCESS'
+    eq('bad signature (verify says FAILURE) -> ignored', bad, 'ignored')
+    eq('PayPal capture not called', payCalls - p1, 0)
+    eq('order still created, match not purchased', [(await orderRow(smOrder.paypal_order_id)).status, (await matchById(sm.id)).status], ['created', 'checkout_pending'])
+    eq('no webhook_events row for the unverified event', (await webhookRows('E2E-WH-BAD')).length, 0)
+    check('only e2e stub hosts were contacted for PayPal (sandbox host)', paypalHttp.every((x) => x.startsWith('/v1/')), paypalHttp)
+  } finally {
+    if (saved.id === undefined) delete process.env.PAYPAL_WEBHOOK_ID; else process.env.PAYPAL_WEBHOOK_ID = saved.id
+    if (saved.base === undefined) delete process.env.PAYPAL_API_BASE; else process.env.PAYPAL_API_BASE = saved.base
+    verifyStatus = 'SUCCESS'
+    captureMode = 'ok'
+  }
+  const expected = warnings.filter((w) => w.startsWith('[paypal-webhook]'))
+  check('expected webhook warnings were logged as short messages (no raw bodies / secrets)', expected.length >= 4 && expected.every((w) => w.length < 160 && !/e2e-placeholder|e2e-sig|access_token/.test(w)), expected)
+  noUnexpectedWarnings('(k)', [/^\[paypal-webhook\]/, FALLBACK_WARN])
+}
+
+async function scenarioL(): Promise<void> {
+  section('(l) a capture that does not match the order is rejected; a later correct capture works')
+  setModelForTests('fast', mockFailingModel())
+  const m = await prepMatch('hp-store-soundhouse', 270)
+  const co = await createCheckout(m.id, ids.user)
+  const p0 = payCalls
+  for (const mode of ['wrong_amount', 'wrong_currency', 'error'] as const) {
+    captureMode = mode
+    const err = await captureOrder(co.paypalOrderId).catch((e) => e)
+    check(`capture mode ${mode}: CheckoutError capture_failed`, err instanceof CheckoutError && err.code === 'capture_failed', String(err?.code ?? err))
+    eq(`capture mode ${mode}: order failed`, (await orderRow(co.paypalOrderId)).status, 'failed')
+    check(`capture mode ${mode}: match not purchased, item not fulfilled`, (await matchById(m.id)).status === 'checkout_pending' && (await itemStatus()) === 'active', [(await matchById(m.id)).status, await itemStatus()])
+  }
+  eq('PayPal capture was attempted 3 times', payCalls - p0, 3)
+  eq('3 order_failed events, no order_captured event', [(await eventsOf('order_failed', m.id)).length, (await eventsOf('order_captured', m.id)).length], [3, 0])
+  captureMode = 'ok'
+  const done = await captureOrder(co.paypalOrderId)
+  check('a failed order can be retried: correct capture completes it', done.status === 'completed' && done.captureId === `CAPTURE${co.paypalOrderId}`, done)
+  eq('match -> purchased, item -> fulfilled only now', [(await matchById(m.id)).status, await itemStatus()], ['purchased', 'fulfilled'])
+  noUnexpectedWarnings('(l)', [FALLBACK_WARN])
+}
+
+async function scenarioM(): Promise<void> {
+  section('(m) fulfilled item / purchased match / max price: no payment')
+  eq('precondition: item is fulfilled (by the capture in (l))', await itemStatus(), 'fulfilled')
+  const em = await prepMatch('hp-store-electromart', 280, { activate: false })
+  const c0 = createCalls
+  const err = await createCheckout(em.id, ids.user).catch((e) => e)
+  check('createCheckout on a fulfilled item -> CheckoutError not_allowed', err instanceof CheckoutError && err.code === 'not_allowed' && err.statusCode === 409, String(err?.code ?? err))
+  eq('no order row, PayPal untouched, match still notified', [(await ordersOf(em.id)).length, createCalls - c0, (await matchById(em.id)).status], [0, 0, 'notified'])
+
+  // captureOrder refuses when the match is already purchased
+  const mei = await matchOf('hp-used-mei')
+  eq('precondition: mei match purchased', (await matchById(mei.id)).status, 'purchased')
+  await must(db().from('orders').insert({ match_id: mei.id, user_id: ids.user, paypal_order_id: 'E2EALREADYPAID0000001', amount: 250, currency: 'USD', status: 'created', approve_url: 'https://www.sandbox.paypal.com/checkoutnow?token=E2EALREADYPAID0000001' }).select(), 'dup order')
+  const p0 = payCalls
+  const err2 = await captureOrder('E2EALREADYPAID0000001').catch((e) => e)
+  check('captureOrder on a purchased match -> CheckoutError already_purchased', err2 instanceof CheckoutError && err2.code === 'already_purchased', String(err2?.code ?? err2))
+  eq('PayPal capture not called, order untouched', [payCalls - p0, (await orderRow('E2EALREADYPAID0000001')).status], [0, 'created'])
+  await must(db().from('orders').delete().eq('paypal_order_id', 'E2EALREADYPAID0000001').select(), 'remove dup order')
+
+  // price above the item's max_price, with a mandate that would allow it
+  const pg = await prepMatch('hp-store-playgrid', 320, { mandate: 400 })
+  const err3 = await createCheckout(pg.id, ids.user).catch((e) => e)
+  check('price 320 > max_price 300 -> CheckoutError exceeds_max_price', err3 instanceof CheckoutError && err3.code === 'exceeds_max_price', String(err3?.code ?? err3))
+  eq('no order row, PayPal untouched, match still notified', [(await ordersOf(pg.id)).length, createCalls - c0, (await matchById(pg.id)).status], [0, 0, 'notified'])
+  eq('guardrail_blocked event logged for it', (await eventsOf('guardrail_blocked', pg.id)).length, 1)
+  await setMandate(300)
+  noUnexpectedWarnings('(m)')
+}
+
+async function scenarioN(): Promise<void> {
+  section('(n) webhook_events accepts the code\'s insert shape and rejects a duplicate id')
+  const first = await db().from('webhook_events').insert({ id: 'E2E-SQL-1', type: 'CHECKOUT.ORDER.APPROVED' })
+  check('insert { id, type } succeeds', !first.error, first.error)
+  const dup = await db().from('webhook_events').insert({ id: 'E2E-SQL-1', type: 'CHECKOUT.ORDER.APPROVED' })
+  check('inserting the same id again fails with error.code 23505', dup.error?.code === '23505', dup.error)
+  const rows = await webhookRows('E2E-SQL-1')
+  check('one row, received_at defaulted', rows.length === 1 && !Number.isNaN(Date.parse(rows[0]!.received_at)), rows)
+  const noType = await db().from('webhook_events').insert({ id: 'E2E-SQL-2' })
+  check('a row without type is rejected (not null, 23502)', noType.error?.code === '23502', noType.error)
+  const del = await db().from('webhook_events').delete().eq('id', 'E2E-SQL-1')
+  check('the claim can be deleted again (the release path)', !del.error && (await webhookRows('E2E-SQL-1')).length === 0, del.error)
+}
+
 // ───────────────────────── main ─────────────────────────
 
 async function main(): Promise<void> {
@@ -511,7 +754,7 @@ async function main(): Promise<void> {
   eq('seeded listings / wishlist items', [Object.keys(ids.listing).length, Object.keys(ids.wishlist).length], [seed.listings.length, 3])
   mockAi(); mockChannel3(); mockPayPal()
 
-  for (const s of [scenarioA, scenarioB, scenarioC, scenarioD, scenarioE, scenarioF, scenarioG, scenarioH, scenarioI]) {
+  for (const s of [scenarioA, scenarioB, scenarioC, scenarioD, scenarioE, scenarioF, scenarioG, scenarioH, scenarioI, scenarioJ, scenarioK, scenarioL, scenarioM, scenarioN]) {
     try { await s() } catch (e) { check(`${s.name} completed without throwing`, false, e instanceof Error ? e.stack ?? e.message : String(e)) }
   }
 
