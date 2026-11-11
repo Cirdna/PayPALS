@@ -7,13 +7,13 @@ Post it with `scripts/team-sync.sh push`.
 
 ## Done
 
-- B1 Channel3 client, B3 Telegram + notifyDeal + webhook, B4 checkout (guarded PayPal) — committed on `ws-b-pay`, 177 tests green.
+- B1 Channel3 client, B2 scan pipeline (`POST /api/scan`), B3 Telegram + notifyDeal + webhook, B4 checkout (guarded PayPal) — committed on `ws-b-pay`, 178 tests green, typecheck clean.
 - Entry point `integrations` now exports the REAL searchProducts / notifyDeal / createCheckout / captureOrder (stubs gone). C can build against it.
 - Local Supabase running on this laptop (migration 0001 applied).
 
 ## In progress
 
-- B2 scan pipeline (`POST /api/scan`) — one teammate on it.
+- Manual checks of scan and checkout: waiting for seed data (C1) and API keys.
 - B0 spikes wait for PayPal sandbox + Channel3 keys.
 
 ## Blocked / needs help
