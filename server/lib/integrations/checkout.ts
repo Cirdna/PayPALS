@@ -10,6 +10,7 @@ import { toCamel } from '../mappers'
 import {
   buildCreateOrderInput, callPayPalTool, findApproveUrl, guardedPayPalTools, makeCheckoutGuard, PayPalGuardError,
 } from './paypal-toolkit'
+import { receiptMessage, tg } from './telegram'
 
 /**
  * Checkout for marketplace listings (docs/ARCHITECTURE.md §9). The spending limit is enforced in CODE:
@@ -144,7 +145,7 @@ export async function captureOrder(paypalOrderId: string): Promise<Order> {
   if (match) unwrap(await db().from('wishlist_items').update({ status: 'fulfilled' }).eq('id', match.wishlist_item_id).eq('user_id', row.user_id), 'fulfil wishlist item')
   const title = listing?.title ?? 'your item'
   await logEvent({ userId: row.user_id, matchId: row.match_id, type: 'order_captured', message: `💸 Paid $${roundMoney(Number(row.amount)).toFixed(2)} for "${title}"`, payload: { paypalOrderId, captureId } })
-  await sendReceipt(row.user_id, `Paid $${roundMoney(Number(row.amount)).toFixed(2)} for ${title}. Receipt: PayPal capture ${captureId ?? paypalOrderId}`)
+  await sendReceipt(row.user_id, listing ? toCamel<Listing>(listing) : null, roundMoney(Number(row.amount)))
   return orderOf(done)
 }
 
@@ -159,14 +160,12 @@ export async function cancelOrder(paypalOrderId: string): Promise<{ matchId: str
   return { matchId: row.match_id }
 }
 
-/** Telegram receipt: best effort. telegram.ts belongs to another teammate and is loaded lazily so this file works without it. */
-async function sendReceipt(userId: string, text: string): Promise<void> {
+/** Telegram receipt: best effort, never blocks or fails the capture. */
+async function sendReceipt(userId: string, listing: Listing | null, amount: number): Promise<void> {
   try {
     const profile = unwrap(await db().from('profiles').select('telegram_chat_id').eq('id', userId).maybeSingle(), 'load profile') as Row | null
-    if (!profile?.telegram_chat_id) return
-    // @ts-ignore telegram.ts may not exist yet (B3, other teammate)
-    const { tg } = await import('./telegram')
-    await tg('sendMessage', { chat_id: profile.telegram_chat_id, text })
+    if (!profile?.telegram_chat_id || !listing) return
+    await tg('sendMessage', { chat_id: profile.telegram_chat_id, parse_mode: 'HTML', text: receiptMessage({ listing, amount }) })
   } catch (e) {
     console.warn('[checkout] telegram receipt failed:', e)
   }
