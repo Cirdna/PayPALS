@@ -8,12 +8,13 @@ Post it with `scripts/team-sync.sh push`.
 ## Done
 
 - A1 review (spec conformance) and A5 security review of the AI library and its two routes: no critical/high findings; routes verify ownership with identical 404s.
-- A3 eval script (`scripts/eval-negotiation.ts`) with a `--mock` mode that runs the full flow against a LOCAL Supabase without any key.
+- A3 eval script (`scripts/eval-negotiation.ts`) with a `--mock` mode that runs the full flow against a LOCAL Supabase without any key (8/8 checks on two runs, nothing left behind).
+- Security fixes in the AI library: seller floor / buyer ceiling can no longer leak through message text, lock and finish races closed, a skipped or paused match stops negotiating, invalid limits fail closed. 176 tests pass (was 115); typecheck clean.
 
 ## In progress
 
-- Security fixes in the AI library (floor/ceiling text leaks, lock/finish races, skipped matches), test-first.
-- A2 (smoke test) and A4 (prompt tuning) need a Gemini key: waiting for keys.
+- Nothing in A needs more code until a Gemini key exists.
+- A2 (smoke test the routes with the real model) and A4 (prompt tuning to the acceptance list) are waiting for the key.
 
 ## Blocked / needs help
 
