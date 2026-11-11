@@ -1,112 +1,127 @@
 # Agent-team playbook (3 humans × 1 Claude Code agent team each)
 
-## 0. Mental model
-- **3 workstreams → 3 humans → 3 agent teams**, one per laptop/branch: A `ws-a-ai`, B `ws-b-pay`, C `ws-c-app`.
-- Inside a team, the **lead** session splits work and teammates coordinate through the team's shared task list + mailbox.
-- **Across teams there is no mailbox.** Coordination = `shared/types.ts` (contract) + `docs/PROGRESS.md` + your human group chat + checkpoint merges. If your agents need something from another workstream, they write a `TODO(owner-X)` and tell you; you relay it.
-- Agent teams are experimental: sessions don't resume well, and two teammates editing one file overwrite each other. Hence the strict file ownership in `CLAUDE.md` and the per-teammate file lists below.
-- Cost: each teammate is a full Claude session. Keep teams to **lead + 3 teammates**.
+## 0. How this is organised
+- **3 workstreams → 3 humans → 3 agent teams**, each on its own laptop and branch: A `ws-a-ai`, B `ws-b-pay`, C `ws-c-app`.
+- **Models: the lead (orchestrator) runs on Opus; every teammate (coder) runs on Sonnet.** The lead plans, assigns tasks and reviews; the teammates implement. Teammates share a task list and can message each other.
+- **There is no messaging between the three teams.** Coordination across workstreams = the contract files (`shared/types`, the migration, `seed/data.json`), the stub entry points (`ai`, `integrations`), `docs/progress/*.md`, your group chat, and the three checkpoint merges.
+- Facts about agent teams that shape the rules below (from the Claude Code docs):
+  - teammates load `CLAUDE.md`, skills and project settings themselves, but **not the lead's conversation** — everything they need must be in the spawn prompt or the repo;
+  - two teammates editing the same file overwrite each other → every teammate gets its own file list;
+  - a teammate's permission prompts appear in the **lead's** terminal → common commands are pre-approved in `.claude/settings.json`, anything else waits for you;
+  - in-process teammates are **not restored** by `/resume` → the plan file and `docs/progress/<X>.md` are how a fresh lead picks up;
+  - teammates cannot spawn their own teammates; the lead sometimes starts coding itself instead of delegating — tell it to wait.
 
-## 1. One-time setup (each human, ~15 min)
+## 1. One-time setup (each human, ~10 min)
 ```bash
-claude --version                      # needs ≥ 2.1.32 for agent teams
-git clone <repo> && cd dealhound && git checkout -b ws-<a|b|c>-...
-cp .env.example .env                  # fill from the team vault
-```
-The repo's `.claude/settings.json` already sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Optional split panes: install tmux and add `"teammateMode": "tmux"` to your **user** `~/.claude/settings.json`, then start Claude inside `tmux`.
-
-### Which skills the team uses (and how that's enforced)
-| Skill source | How it's shared | Used for |
-|---|---|---|
-| **Superpowers** plugin | `enabledPlugins` in the committed `.claude/settings.json` | `writing-plans`, `executing-plans`, `subagent-driven-development`, `test-driven-development`, `verification-before-completion`, `systematic-debugging` |
-| **ECC** – only selected skills | copied into `.claude/skills/` and committed | security review of payment/webhook code |
-| **Graphify** | `graphify install --project` → `.claude/skills/graphify/` committed | codebase map / queries |
-
-The committed `.claude/settings.json` also **pre-approves** `Skill(superpowers:*)` and `Skill(graphify)` (no approval prompts for agents) and **denies** `Skill(superpowers:brainstorming)` so agents can't start the interactive design Q&A (the design is done). Deny rules stop Claude from calling a skill itself; a human can still type the slash command.
-
-**Superpowers** — each person, once, from the repo root:
-```bash
+claude --version          # agent teams need v2.1.32 or later — update if older
+git clone <repo> && cd <repo> && git checkout -b ws-<a-ai|b-pay|c-app>
+pnpm install && pnpm test # must be green before you start
+cp .env.example .env      # fill from the team vault
 claude plugin install superpowers@claude-plugins-official --scope project
+git config core.hooksPath .githooks   # strips any Claude co-author / "Generated with" lines from commits
 ```
-(If Claude says *"enabled in project settings but isn't installed"*, that's the command to run.)
+**No AI attribution on GitHub:** Claude must never show up as a co-author. This is enforced three ways: the rule in `CLAUDE.md`,
+`"attribution": { "commit": "", "pr": "" }` in `.claude/settings.json`, and the `.githooks/commit-msg` hook above (needed
+because the setting has not always been honoured). Run the `git config` line once per clone — git does not enable hooks
+automatically. Before each push, `git log --format=%B origin/main..HEAD | grep -i "co-authored-by\|claude"` should print nothing.
+What the committed `.claude/settings.json` already does: turns agent teams on, enables Superpowers, sets edit mode to
+auto-accept, pre-approves `pnpm test / typecheck / build / dev`, the seed/eval/spike scripts and `git add <files>` /
+`git commit`, and **blocks** `git push`, `git add -A`, `git reset --hard`, installing packages, reading `.env`, and the
+interactive Superpowers brainstorming skill. Humans push; agents never do.
 
-**ECC — Everything Claude Code: install selectively, not the whole kit.** The full plugin ships ~300 skills plus hooks that overlap Superpowers' workflow; for a 30-hour build that's noise and token cost. One person adds just the skills we want to the repo and commits them:
-```bash
-npx skills add affaan-m/ECC --skill security-review --agent claude-code   # → .claude/skills/security-review/
-```
-Browse the repo's `skills/` folder for any other single skill worth adding (e.g. a TypeScript or Vue reviewer), same command. Optional TS rules (personal, not committed):
-```bash
-git clone https://github.com/affaan-m/ECC.git /tmp/ecc
-mkdir -p ~/.claude/rules/ecc && cp -R /tmp/ecc/rules/common /tmp/ecc/rules/typescript ~/.claude/rules/ecc/
-```
-Want the full ECC plugin anyway? `/plugin marketplace add affaan-m/everything-claude-code` then `/plugin install ecc@ecc` — but do it in your *user* scope and disable it if hooks get noisy. A personal opt-out of any team plugin goes in `.claude/settings.local.json` (not committed).
+Optional:
+- **Split panes:** run Claude inside tmux and start it with `claude --teammate-mode tmux`.
+- **Security review:** Claude Code's built-in `/security-review` is enough. If you want ECC's version, add only that one skill (`npx skills add affaan-m/ECC --skill security-review --agent claude-code`) — do not install the whole ECC plugin for this sprint (hundreds of skills and hooks that overlap Superpowers).
+- **Graphify:** `pipx install graphifyy && graphify install --project`, then `/graphify . --wiki` on your own machine after Checkpoint 1 when the codebase is big enough to be worth mapping. `graphify-out/` is git-ignored on purpose (committing it from three branches guarantees merge conflicts), and do not install the post-commit hook.
 
-**Check what's loaded:** run `/skills` in Claude Code. **Force a specific skill:** type it as a slash command (e.g. `/superpowers:writing-plans`) or name it in the prompt ("use the security-review skill on server/api/checkout/").
-
-**Graphify** (codebase knowledge graph shared by all agents):
-```bash
-pipx install graphifyy          # or: pip install graphifyy
-graphify install --project      # installs the /graphify skill into this repo's .claude/skills
-graphify hook install           # rebuilds the graph on every commit
-```
-After C's H0 scaffold lands, one person runs `/graphify . --wiki` and commits `graphify-out/` (wiki + GRAPH_REPORT.md). Agents read `graphify-out/wiki/index.md` instead of crawling the repo. Re-run `/graphify . --update` after each checkpoint merge. (Value grows with repo size — early on it's mostly a map; don't block on it.)
-
-## 2. Starting your team — paste into Claude Code (lead session)
+## 2. Start your team — paste into the lead session
+**Set the lead to Opus first** — the committed `.claude/settings.json` already makes Opus the default for this repo; confirm with `/model` (switch with `/model opus` if it shows anything else). Then paste the block for your workstream. Each block tells the lead to spawn its teammates on Sonnet; after the team is created, check the teammate list shows Sonnet and, if not, tell the lead: "Shut down the teammates and re-create them on Sonnet."
+The plans already exist in `docs/superpowers/plans/` — the leads execute them, they do not write new ones.
+Because workstream A's library is finished, the human lead of A should spend spare time helping B (the scan pipeline is the largest remaining piece).
 
 ### Workstream A — AI engine
+The AI library is already implemented and tested, so this team is small: the lead plus one teammate.
 ```
-Read CLAUDE.md, docs/SCOPE.md, docs/ARCHITECTURE.md and docs/superpowers/specs/A-ai-engine.md.
-The design is approved: skip brainstorming. Use the Superpowers writing-plans skill to write
-docs/superpowers/plans/A-ai-engine.md, then create an agent team to execute it:
-- teammate "guard": server/lib/ai/guardrail.ts + tests/ai/guardrail*.test.ts (TDD, property test first)
-- teammate "risk": server/lib/ai/risk/** + tests/ai/risk*.test.ts (TDD with seed fixtures)
-- teammate "nego": server/lib/ai/model.ts, structured.ts, prompts/**, matcher.ts, negotiation.ts,
-  server/api/matches/**, server/api/negotiations/** (starts after guard's API is committed; mock it until then)
-Only touch files listed for each teammate. Code against shared/types.ts; stub C/B dependencies behind the
-names in the spec. Every task ends with pnpm test && pnpm typecheck and a line in docs/PROGRESS.md.
-Checkpoint 1 is Thu 09:00 SGT — prioritise guardrail, risk, matcher in that order.
+You are the lead (orchestrator) of workstream A, running on Opus. Every teammate you spawn must run on Sonnet —
+state the model explicitly when you spawn it. Read CLAUDE.md, docs/STACK_NOTES.md, docs/ARCHITECTURE.md (§5–§7) and the plan
+docs/superpowers/plans/A.md. The design is approved and the plan is written — do not redesign, brainstorm or
+rewrite the plan. The library under server/lib/ai is already implemented and tested; your work is review, an eval
+script and prompt tuning against the real model.
+
+1. Do task A1 yourself (review, no code).
+2. Create an agent team with ONE teammate on Sonnet named "eval", scoped to scripts/eval-negotiation.ts only, for
+   task A3. Put in its spawn prompt: the full text of task A3 from the plan, the instruction to read CLAUDE.md and
+   docs/STACK_NOTES.md first, to touch no other file, to never spawn subagents, and to report the script's full
+   output to you.
+3. When the human confirms the database is seeded and keys are set, guide them through task A2, then run task A4
+   (prompt tuning) together with "eval": one change at a time, eval after each, keep or revert.
+4. You alone edit server/lib/ai/prompts/**, server/lib/ai/matcher.ts (prompt only), server/lib/ai/index.ts and
+   docs/progress/A.md. Never weaken a rule in guardrail.ts to make a negotiation succeed.
+Checkpoint 1 is Thu 09:00 SGT: A1–A3 done and a first eval table recorded.
 ```
 
 ### Workstream B — Payments & integrations
 ```
-Read CLAUDE.md, docs/SCOPE.md, docs/ARCHITECTURE.md and docs/superpowers/specs/B-payments-integrations.md.
-The design is approved: skip brainstorming. FIRST, yourself (no team yet): run the PayPal and Channel3 spikes
-in the spec and record the toolkit-vs-REST decision in docs/PROGRESS.md. Then use writing-plans to write
-docs/superpowers/plans/B-payments-integrations.md and create an agent team:
-- teammate "paypal": server/lib/integrations/paypal-*.ts, checkout.ts, server/api/checkout/**,
-  server/api/paypal/**, tests/integrations/paypal*.test.ts
-- teammate "comms": server/lib/integrations/telegram.ts, server/api/telegram/**, tests/integrations/telegram*.test.ts
-- teammate "scan": server/lib/integrations/channel3.ts, scan.ts, server/api/scan.post.ts, supabase/cron.sql,
-  tests/integrations/{channel3,scan}*.test.ts
-Only touch files listed for each teammate. Stub the AI engine (server/lib/ai) until A merges.
-Before Checkpoint 2, run the ECC security review on checkout, webhook, telegram and scan routes.
+You are the lead (orchestrator) of workstream B, running on Opus. Every teammate you spawn must run on Sonnet —
+state the model explicitly when you spawn it. Read CLAUDE.md, docs/STACK_NOTES.md, docs/ARCHITECTURE.md (§2–§4, §8–§10) and the
+plan docs/superpowers/plans/B.md. The design is approved and the plan is written — do not redesign, brainstorm or
+rewrite the plan. Task B0 (spikes) is done by the human; its results are in docs/progress/B.md — read them.
+
+1. Create an agent team with three teammates, each on Sonnet, named and scoped exactly as in the plan's teammate
+   table: "scan" (tasks B1, B2), "comms" (task B3), "paypal" (task B4).
+   Put in each spawn prompt: its file list, the FULL TEXT of its tasks copied from the plan including "Ground rules
+   for every task", the instruction to read CLAUDE.md and docs/STACK_NOTES.md first, to work test-first, to use the
+   existing test helpers (tests/helpers/fake-db.ts, seed-fixture.ts, mock-model.ts) instead of writing mocks, to
+   touch no other files, to never spawn subagents, and to report to you after each task with the test output.
+2. You alone edit server/lib/integrations/index.ts (task B5) and docs/progress/B.md.
+3. Do not implement tasks yourself. Wait for teammates; review each finished task: run pnpm test && pnpm typecheck,
+   read the diff against the plan and docs/ARCHITECTURE.md, send it back if it deviates.
+The AI engine (import { ai } from '~~/server/lib/ai') is real and complete — build against it.
+Checkpoint 1 is Thu 09:00 SGT: B1–B3 done, scan verified locally against the seeded database.
 ```
 
 ### Workstream C — App, data & UI
 ```
-Read CLAUDE.md, docs/SCOPE.md, docs/ARCHITECTURE.md and docs/superpowers/specs/C-app-data-ui.md.
-The design is approved: skip brainstorming. FIRST, yourself (no team yet): do the H0 scaffold in the spec
-(Nuxt 4, modules, deps, runtimeConfig, server/utils, migration applied, Vercel hello-world). Commit and push
-to main immediately — the other two workstreams are blocked on it. Then use writing-plans to write
-docs/superpowers/plans/C-app-data-ui.md and create an agent team:
-- teammate "data": supabase/seed.ts + seed JSON, server/utils/**, server/api/{me,events}.get.ts,
-  server/api/wishlist/**, server/api/deals/**, tests/app/api*.test.ts
-- teammate "grid": app/pages/deals/index.vue, AG Grid setup, ActivityFeed.vue, useDeals.ts, useRealtime.ts
-- teammate "pages": app/pages/{index,login,wishlist,settings}.vue, app/pages/deals/[matchId].vue,
-  remaining components (RiskBadge, RiskEvidence, NegotiationTranscript, MandateCard, PriceDelta)
-Only touch files listed for each teammate. The demo video is judged on Design — polish matters.
+You are the lead (orchestrator) of workstream C, running on Opus. Every teammate you spawn must run on Sonnet —
+state the model explicitly when you spawn it. Read CLAUDE.md, docs/STACK_NOTES.md, docs/ARCHITECTURE.md (§2, §3, §11, §12) and
+the plan docs/superpowers/plans/C.md. The design is approved and the plan is written — do not redesign, brainstorm
+or rewrite the plan. Task C0 (Supabase + Vercel) is done by the human.
+
+1. Create an agent team with three teammates, each on Sonnet, named and scoped exactly as in the plan's teammate
+   table: "data" (C1 then C2), "grid" (C3), "pages" (C5 then C4).
+   Put in each spawn prompt: its file list, the FULL TEXT of its tasks copied from the plan including "Ground rules
+   for every task", the instruction to read CLAUDE.md and docs/STACK_NOTES.md first, to touch no other files, to
+   never spawn subagents, to run pnpm typecheck after every component, and to report to you after each task.
+   "grid" must commit task C3 step 1 (labels, RiskBadge, StatusChip) before "pages" starts C4.
+   Until GET /api/deals exists, "grid" develops against a local array of DealRow fixtures.
+2. You alone edit contract files (shared/**, migrations, seed/data.json, .env.example, docs/ARCHITECTURE.md,
+   docs/STACK_NOTES.md) and docs/progress/C.md — contract files only when the human says the three leads agreed.
+3. Do not implement tasks yourself. Wait for teammates; review each finished task and send it back if it deviates.
+Design quality is 20 % of the judging: the Deals board and the deal page must look finished.
+Checkpoint 1 is Thu 09:00 SGT: C1 and C2 done, the board shows rows.
 ```
 
-## 3. Rhythm
-| Time (SGT) | What humans do |
+## 3. Rhythm for the humans
+| When | What you do |
 |---|---|
-| Every ~2h | Skim your team's task list; unblock; push branch; post a 3-line status in group chat |
-| Checkpoints Thu 09:00 / 15:00 / 21:00 | 20-min call. Each lead rebases on `main`, runs `pnpm test && pnpm typecheck`, merges (order: C → A → B). Fix integration breaks together. `/graphify . --update`. |
-| Contract change | Post in chat **before** editing `shared/types.ts` or migrations; C merges it; others rebase |
-| Overnight | Only leave agents running on test-covered tasks with clear acceptance; never on deploy/payment config |
+| Every 1–2 h | Open the lead: answer permission prompts, skim the task list (Ctrl+T), read `docs/progress/<X>.md`, `git push` your branch, post 3 lines in the group chat |
+| A teammate failed twice on the same thing | Take that one problem to the Opus lead or fix it by hand; restart only that Sonnet teammate with a sharper prompt |
+| Checkpoints Thu 09:00 / 15:00 / 21:00 | 20-minute call. Merge order **C → A → B** into `main`; after each merge run `pnpm install && pnpm test && pnpm typecheck && pnpm build`; fix breaks together; redeploy; run the demo path |
+| Contract change needed | Agree in chat first → C commits it straight to `main` → A and B merge `main` into their branch immediately |
+| Overnight | Leave agents only on `server/lib` tasks that have tests and clear acceptance. Nothing that needs a browser, an account or a decision. Expect to find them idle on a permission prompt — that is fine |
+| Session died | New lead session: "Read CLAUDE.md, docs/superpowers/plans/<X>.md and docs/progress/<X>.md, then continue from the first unfinished task and re-create the team." |
 
-## 4. When things go wrong
-- Teammate stuck/looping → stop it, write the failing case into the plan, restart that teammate only.
-- Session lost → start a fresh lead, point it at the plan file + `docs/PROGRESS.md` (that's why we log progress).
-- Two teams need the same new type → C adds it to `shared/types.ts` in a tiny PR within 15 min.
-- Gemini 429s → switch to your own key/project, lower concurrency, rely on cached matches.
+## 4. What the Opus lead does itself, and what goes to Sonnet
+**Opus (lead):** orchestration, review of every finished task, hard debugging · the guardrail rules and property test · negotiation and risk prompt
+tuning with `pnpm eval:negotiation` · the PayPal spike and any payment bug · integration review at each checkpoint ·
+the security review · README and Devpost text.
+**Sonnet (teammates):** all implementation from the plans — routes, the scan pipeline, checkout, Telegram, the seed
+script, pages and components, the eval script. Teammates do not review their own work; the Opus lead does.
+
+## 5. Troubleshooting
+- **Claude spawned subagents instead of a team** → say "create an agent team" explicitly.
+- **Lead is coding instead of delegating** → "Wait for your teammates to complete their tasks."
+- **Task stuck as in-progress** → check whether the work is done; tell the lead to update the task or nudge the teammate.
+- **Two teammates touched the same file** → stop both, `git diff`, keep one version, restate the file lists.
+- **Gemini 429 errors** → use your own AI Studio key/project; calls are sequential by design; wait a minute.
+- **`pnpm typecheck` fails after a merge** → almost always a contract drift: compare with `shared/types/index.ts`, never patch with `any`.

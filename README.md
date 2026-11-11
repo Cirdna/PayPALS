@@ -1,115 +1,98 @@
 # DealHound 🐕 — your AI buyer's agent
 
-> Tell it what you want and your max price. It watches the internet, screens out scams, haggles with sellers, and pings you on Telegram with a deal you approve and pay for with PayPal.
+> Tell it what you want and your maximum price. It watches for listings, screens out scams, haggles with the seller
+> inside a spending limit that is enforced in code, pings you on Telegram, and you approve the payment with PayPal.
 
-Built for the **PayPal AI Hackathon 2026** (Devpost). Working name — rename freely.
-
----
+Built for the **PayPal AI Hackathon 2026**. Working name.
 
 ## The problem
+- Good deals are scattered across retailers and secondhand listings; checking them by hand is a chore.
+- Haggling is awkward, so most people overpay.
+- Bargain hunters are exactly who "too good to be true" scam listings target.
+- Letting an AI agent spend money is only acceptable if it provably cannot overspend or be talked into it.
 
-- Good deals are scattered across thousands of retailers and secondhand listings; checking them manually is a chore.
-- Haggling is awkward and most people leave money on the table.
-- Online purchase scams are common, and the people most likely to fall for a "too good to be true" listing are the ones hunting hardest for a bargain.
+## What it does
+1. **Wishlist + mandate** — "Sonaro WH-700 headphones, max $300". The mandate (limit, expiry, approval required) is the only authority the agent has.
+2. **Watch** — on a schedule and on demand, the agent searches **Channel3** (real retail offers) and a secondhand marketplace.
+3. **Match** — an LLM rejects look-alikes (older model, accessory only, wrong variant).
+4. **Scam check** — statistics against retail price comps plus rule signals, each with **quoted evidence** from the listing.
+5. **Negotiate** — a buyer agent haggles with the seller's agent. Every move passes a code guardrail; prompt-injection attempts by sellers are detected, shown and ignored.
+6. **Notify** — Telegram message with the deal, the risk verdict and an *Approve & pay* button.
+7. **Pay** — the agent creates the PayPal order through the **PayPal Agent Toolkit**; the tool call is blocked unless the amount equals the agreed price and fits the mandate. You approve in PayPal; the payment is captured.
 
-## What DealHound does
-
-1. **Wishlist** – "Noise-cancelling headphones, model X, black, new or like-new, max S$380."
-2. **Watch** – a scheduled agent scans **Channel3** (100M+ products from 25k+ retailers) and a secondhand marketplace every 15 minutes.
-3. **Match** – an LLM checks each result really matches the spec (not a cheaper look-alike model).
-4. **Scam-check** – statistical price anomaly vs. retail comps + rule signals (off-platform payment, urgency, new account, duplicated text) + an LLM explanation that **quotes the evidence**.
-5. **Negotiate** – for negotiable listings, a buyer agent haggles with the seller's agent. A **code-enforced mandate** means it can never exceed your max — even if the seller attempts prompt injection.
-6. **Notify** – Telegram message with the deal, the risk verdict and an **Approve & pay** button.
-7. **Pay** – PayPal order created via the **PayPal Agent Toolkit**, approved by you, captured, confirmed by webhook.
+Retail offers found through Channel3 are bought at the retailer (the agent sends the link and uses their prices as comps);
+PayPal checkout applies to marketplace listings.
 
 ## How PayPal is used
-- **PayPal Agent Toolkit** (`@paypal/agent-toolkit/ai-sdk`) – the checkout agent creates and captures **Orders v2** through the toolkit's tools, wrapped in a **mandate guard** that blocks any amount above the user's pre-approved limit (AP2-style mandate).
-- **Orders API v2** – create → buyer approval → capture (sandbox).
-- **Webhooks** – `PAYMENT.CAPTURE.COMPLETED` confirms purchase and triggers the Telegram receipt.
+- **PayPal Agent Toolkit** (`@paypal/agent-toolkit`): `create_order` and `pay_order` (capture) are called as agent tools.
+- **Mandate guard** (`server/lib/integrations/paypal-toolkit.ts`): every toolkit call runs through code that enforces *one item, exact agreed amount, USD, within the user's mandate* before PayPal is contacted — a tool call inflated by a manipulated model becomes a tool error, not an order. Covered by tests.
+- **Orders v2 flow**: create → buyer approval → capture on return (sandbox).
 
 ## How AI is used
-| Component | Model role | Why AI |
+| Component | Model | Role |
 |---|---|---|
-| Matcher | Fast model, structured output | Fuzzy spec matching across messy product titles |
-| Scam explainer | Smart model, structured output with evidence quotes | Turns statistical + rule signals into a human-readable verdict |
-| Buyer agent | Smart model, structured offers | Negotiates within a mandate |
-| Seller agents (demo marketplace) | Smart model with hidden personas | Realistic counter-party incl. a scammer and a prompt-injector |
-| Checkout agent | Smart model + PayPal Agent Toolkit tools | Agentic payment under a code-enforced mandate |
+| Matcher | Gemini (fast) | One structured call per batch of listings: is this really the wanted item? |
+| Risk explanation | Gemini (smart) | Turns computed signals into a short explanation (signals and scores are computed in code) |
+| Buyer agent | Gemini (smart) | Structured offers under the guardrail |
+| Seller agents | Gemini (smart) | Demo marketplace counterparties with personas and hidden floor prices |
+| Checkout agent | Gemini (fast) | Calls the guarded PayPal toolkit tool |
 
-LLM: **Google Gemini** via the Vercel AI SDK (`@ai-sdk/google`). Provider is swappable through `AI_PROVIDER`.
+All model access goes through the Vercel AI SDK (`ai` + `@ai-sdk/google`); model ids are environment variables.
 
 ## Tech stack
-| Layer | Choice |
-|---|---|
-| App | **Nuxt 4** (Vue 3, TypeScript) – pages + Nitro server routes in one repo |
-| UI | Nuxt UI (Tailwind) + **AG Grid** (`ag-grid-vue3`) for the Deals board |
-| DB / Auth | **Supabase** (Postgres, Auth, `pg_cron` + `pg_net` for the watcher schedule) |
-| AI | Vercel AI SDK + Gemini (`@ai-sdk/google`) |
-| Payments | PayPal Agent Toolkit + Orders v2 (sandbox) + webhooks |
-| Product search | **Channel3** API |
-| Alerts | Telegram Bot API (raw HTTPS, webhook) |
-| Hosting | **Vercel** (Hobby) |
-| Tests | Vitest |
-
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for diagrams, data model and API contracts.
-
-## Architecture (overview)
+Nuxt 4 (Vue 3, TypeScript) · Nuxt UI · **AG Grid** (Deals board) · Supabase (Postgres, Auth, Realtime, pg_cron) ·
+Vercel AI SDK + Gemini · PayPal Agent Toolkit (sandbox) · **Channel3** product search · Telegram Bot API · Vercel · Vitest.
 
 ```mermaid
 flowchart LR
   U[User - web app] -->|wishlist + mandate| API[Nuxt server routes on Vercel]
-  CRON[Supabase pg_cron every 15 min] -->|POST /api/scan| API
-  API --> C3[Channel3 search]
-  API --> MP[(Demo marketplace in Supabase)]
-  API --> AI[Gemini via AI SDK: match / scam / negotiate]
-  API --> DB[(Supabase Postgres)]
-  API -->|deal found| TG[Telegram bot]
-  TG -->|Approve & pay| PP[PayPal checkout - Agent Toolkit]
-  PP -->|webhook| API
+  CRON[Supabase pg_cron] -->|POST /api/scan| API
+  API --> C3[Channel3]
+  API --> MP[(Demo marketplace)]
+  API --> AI[Gemini: match / explain / negotiate]
+  API --> G{{Code guardrail + mandate}}
+  G --> PP[PayPal Agent Toolkit]
+  API --> TG[Telegram]
+  API --> DB[(Supabase)]
 ```
+Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-## Quick start
-
+## Run it locally
 ```bash
-# prerequisites: Node 20+, pnpm, a Supabase project, PayPal sandbox app, Channel3 key, Gemini key, Telegram bot token
+# Node 20+, pnpm 10
 pnpm install
-cp .env.example .env          # fill in values
-pnpm supabase db push         # or paste supabase/migrations/*.sql into the SQL editor
-pnpm db:seed                  # demo marketplace listings + sellers
-pnpm dev                      # http://localhost:3000
-pnpm test                     # vitest
+cp .env.example .env            # fill in the values (Supabase, Gemini, PayPal sandbox, Channel3, Telegram)
+# Supabase SQL editor: run supabase/migrations/0001_init.sql once
+pnpm db:seed                    # demo marketplace + demo account
+pnpm dev                        # http://localhost:3000  →  "Use the demo account"
+pnpm test && pnpm typecheck
 ```
 
-Telegram webhook (after deploying):
-```bash
-curl "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/setWebhook?url=https://<your-app>.vercel.app/api/telegram/webhook&secret_token=$TELEGRAM_WEBHOOK_SECRET"
-```
+## Try the hosted demo
+- URL: `TODO`
+- App login: "Use the demo account" on the login page (`TODO email` / `TODO password`)
+- PayPal sandbox buyer (to approve the payment): `TODO email` / `TODO password`
+- Telegram (optional): Settings → "Link Telegram". Without it, deals appear in the app and the *Approve & pay* button is on the deal page.
+- Settings → "Reset demo data" starts the scenario again.
 
-## Demo / judge access
-- Live URL: `TODO`
-- Demo login: `TODO` (seeded account with wishlist items)
-- PayPal sandbox buyer: `TODO` (sandbox personal account email/password for approving payments)
-- Telegram: `@TODO_bot` — press **Start** from the link on the Settings page.
+The demo marketplace uses fictional brands and AI seller agents (including a scammer and a seller that attempts prompt
+injection) so the whole flow can be shown safely. Channel3 results are real retail offers.
 
 ## Repository map
 ```
-app/                 Vue pages, components, composables (Workstream C)
-server/api/          HTTP endpoints (B owns payments/telegram/scan, A owns negotiate)
-server/lib/ai/       Matcher, scam engine, negotiation, guardrails (Workstream A)
-server/lib/integrations/  PayPal, Channel3, Telegram clients (Workstream B)
-shared/types.ts      THE contract between workstreams – change only via the contract owner
-supabase/            Migrations + seed (Workstream C)
-docs/                Scope, architecture, agent-team playbook, workstream specs
+app/                        pages, components (C)
+server/api/                 thin HTTP routes
+server/lib/ai/              matcher, risk engine, guardrail, negotiation (A)
+server/lib/integrations/    Channel3, scan, Telegram, checkout, guarded PayPal toolkit (B)
+shared/types/               the data contract
+supabase/                   schema, seed data, cron
+docs/                       scope, architecture, stack notes, agent-team playbook, specs
 ```
+Built by three people, each leading a Claude Code agent team — see [`docs/AGENT_TEAMS.md`](docs/AGENT_TEAMS.md).
 
-## Team & workflow
-Three humans, each leading a Claude Code **agent team** on one workstream. See [`docs/AGENT_TEAMS.md`](docs/AGENT_TEAMS.md) and [`CLAUDE.md`](CLAUDE.md).
-
-## Roadmap (post-hackathon)
-- Real secondhand marketplace integrations (via partner APIs) instead of the demo marketplace
-- **PayPal Links** for approvals inside any chat; **PayPal World** so cross-border sellers get paid in their home wallet
-- PayPal Vault for fully automatic purchase within a mandate
-- PYUSD settlement for cross-border deals
+## Roadmap
+Real secondhand-marketplace integrations · PayPal Vault for automatic purchase inside a mandate · paying the seller's
+own PayPal account · approvals through PayPal payment links in any chat · more currencies.
 
 ## License
 MIT — see [`LICENSE`](LICENSE).

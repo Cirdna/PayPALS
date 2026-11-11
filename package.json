@@ -1,0 +1,57 @@
+{
+  "name": "dealhound",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.28.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare",
+    "typecheck": "nuxt typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "db:seed": "tsx --tsconfig tsconfig.scripts.json --env-file=.env supabase/seed.ts",
+    "db:reset-demo": "tsx --tsconfig tsconfig.scripts.json --env-file=.env supabase/seed.ts --reset",
+    "eval:negotiation": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/eval-negotiation.ts",
+    "spike:paypal": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/paypal-spike.ts",
+    "spike:channel3": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/channel3-spike.ts"
+  },
+  "dependencies": {
+    "@ai-sdk/google": "^4.0.117",
+    "@channel3/sdk": "^4.9.0",
+    "@iconify-json/lucide": "^1.2.0",
+    "@nuxt/ui": "^4.12.0",
+    "@nuxtjs/supabase": "^2.1.0",
+    "@paypal/agent-toolkit": "^1.11.0",
+    "@supabase/supabase-js": "^2.0.0",
+    "ag-grid-community": "^36.3.0",
+    "ag-grid-vue3": "^36.3.0",
+    "ai": "^7.0.169",
+    "nuxt": "^4.6.4",
+    "tailwindcss": "^4.0.0",
+    "vue": "^3.5.43",
+    "vue-router": "^5.5.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.3",
+    "vitest": "^3.0.0",
+    "vue-tsc": "^3.0.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@parcel/watcher",
+      "esbuild",
+      "unrs-resolver",
+      "vue-demi",
+      "@tailwindcss/oxide",
+      "sharp"
+    ]
+  }
+}
