@@ -2,6 +2,8 @@
 // Owner: C ("grid"). The Deals board: AG Grid + live activity feed + scan + background negotiation stepper.
 import { formatMoney } from '#shared/utils/money'
 
+useHead({ title: 'Deals · DealHound' })
+
 const { rows, refresh, status, error, scanning, progress, scanAll } = useDeals()
 useBackgroundStepper(rows, () => {
   void refresh()

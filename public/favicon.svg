@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="14" fill="#16a34a"/>
+  <!-- price tag -->
+  <path d="M14 30 30 14h20v20L34 50a4 4 0 0 1-5.7 0L14 35.7a4 4 0 0 1 0-5.7Z" fill="#fff"/>
+  <circle cx="42" cy="22" r="4" fill="#16a34a"/>
+  <path d="M26 36l4 4 8-9" fill="none" stroke="#16a34a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
