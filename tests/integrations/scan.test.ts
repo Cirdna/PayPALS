@@ -221,6 +221,19 @@ describe('runScan (headphones, seeded marketplace)', () => {
     expect(search).toHaveBeenCalledWith(expect.objectContaining({ query: 'Sonaro WH-700 noise cancelling headphones', limit: 10 }))
   })
 
+  it('16. failures are logged as messages only, never as whole error objects', async () => {
+    const warn = vi.mocked(console.warn)
+    await addListing({ id: 'hp-store-sale', seller_id: 'soundhouse', title: 'Sonaro WH-700 headphones sale', price: 289, negotiable: false, condition: 'new' })
+    notifySpy.mockRejectedValue(Object.assign(new Error('notify boom'), { config: { headers: { Authorization: 'Bearer secret' } } }))
+    vi.spyOn(integrations, 'searchProducts').mockRejectedValue(new Error('search boom'))
+    vi.spyOn(ai, 'startNegotiation').mockRejectedValue(new Error('negotiation boom'))
+    await scanHeadphones()
+    const logged = warn.mock.calls.filter((c) => /notify|search|negotiation/.test(String(c.join(' '))))
+    expect(logged.length).toBeGreaterThanOrEqual(3)
+    for (const call of warn.mock.calls) for (const arg of call) expect(typeof arg).toBe('string')
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('secret')
+  })
+
   it('15. respects the time budget', async () => {
     const res = await runScan({ wishlistItemId: 'wl-headphones', userId: DEMO_USER_ID, isCron: false, budgetMs: 0 })
     expect(matchSpy).not.toHaveBeenCalled()

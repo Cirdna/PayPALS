@@ -15,6 +15,9 @@ const NEGOTIABLE_BUDGET_FACTOR = 1.3
 const MAX_NEGOTIATION_STEPS_PER_CRON = 3
 const MAX_ITEMS_PER_CRON = 2
 
+/** Log helper: message only, never the whole error object (SDK errors can carry request headers/config). */
+const errMsg = (e: unknown): string => (e instanceof Error ? e.message : 'unknown error')
+
 export class ScanError extends Error {
   constructor(public readonly code: 'not_found', message: string) {
     super(message)
@@ -62,7 +65,7 @@ export async function runScan(opts: { wishlistItemId?: string; userId?: string; 
         if (!r.busy) out.negotiationsAdvanced++
         if (r.negotiation.status === 'agreed' && (await integrations.notifyDeal(r.negotiation.matchId))) out.notificationsSent++
       } catch (e) {
-        console.warn('[scan] negotiation step failed', e)
+        console.warn('[scan] negotiation step failed:', errMsg(e))
       }
     }
     items = unwrap(
@@ -84,7 +87,7 @@ export async function runScan(opts: { wishlistItemId?: string; userId?: string; 
     try {
       await scanItem(row, out, overBudget)
     } catch (e) {
-      console.warn(`[scan] item ${row.id} failed`, e)
+      console.warn(`[scan] item ${row.id} failed:`, errMsg(e))
     }
     out.itemsScanned++
   }
@@ -108,7 +111,7 @@ async function scanItem(row: Row, out: ScanResponse, overBudget: () => boolean):
   try {
     drafts = await integrations.searchProducts(item.query, { limit: 10 })
   } catch (e) {
-    console.warn('[scan] channel3 search failed, continuing with marketplace only', e)
+    console.warn('[scan] channel3 search failed, continuing with marketplace only:', errMsg(e))
   }
   if (drafts.length > 0) {
     channel3Rows = unwrap(
@@ -215,7 +218,7 @@ async function riskFor(item: WishlistItem, listing: Listing, compPrices: number[
     seller = sellerRow ? toCamel<Seller>(sellerRow) : null
   }
   if (listing.source === 'marketplace') {
-    const secret = unwrap(await db().from('listing_secrets').select('*').eq('listing_id', listing.id).maybeSingle(), 'load listing secret') as Row | null
+    const secret = unwrap(await db().from('listing_secrets').select('scripted_messages').eq('listing_id', listing.id).maybeSingle(), 'load listing secret') as Row | null
     sellerOpener = (secret?.scripted_messages as Record<string, string> | undefined)?.['0'] ?? null
   }
   return ai.assessRisk({ listing, seller, compPrices, maxPrice: item.maxPrice, sellerOpener })
@@ -245,7 +248,7 @@ async function autoNegotiate(item: WishlistItem, out: ScanResponse): Promise<voi
     await ai.startNegotiation(next.id)
     out.negotiationsStarted++
   } catch (e) {
-    console.warn('[scan] startNegotiation failed', e)
+    console.warn('[scan] startNegotiation failed:', errMsg(e))
   }
 }
 
@@ -259,6 +262,6 @@ async function notifyBest(item: WishlistItem, out: ScanResponse): Promise<void> 
   try {
     if (await integrations.notifyDeal(best.id)) out.notificationsSent++
   } catch (e) {
-    console.warn('[scan] notifyDeal failed', e)
+    console.warn('[scan] notifyDeal failed:', errMsg(e))
   }
 }
