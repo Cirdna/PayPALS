@@ -67,4 +67,4 @@ pnpm build        # only before checkpoints
 - One branch per workstream: `ws-a-ai`, `ws-b-pay`, `ws-c-app`. Small commits, conventional messages (`feat(ai): guardrail property test`).
 - `git add <your own files>` only — **never** `git add -A` / `git add .` (other teammates share your working tree). If `.git/index.lock` exists, wait 5 s and retry.
 - **Never write the word "Claude" in anything sent to GitHub:** commit messages, branch names, pull request titles and descriptions, issues, comments. Say "the agent" or leave it out. (The `commit-msg` hook rejects commits that contain it.)
-- Agents may push their own workstream branch (`git push -u origin <branch>`), never force-push, and never push to `main`. Agents do not rebase, reset, or switch branches. The human lead merges at checkpoints.
+- Agents may use git and `gh` freely (push, merge, branch, rebase, PRs). The only GitHub rules are the two above: no "Claude" in anything sent to GitHub, and never Claude as a co-author.
