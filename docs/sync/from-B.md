@@ -26,6 +26,9 @@ Write requests as `- to A: <what you need, and which file or endpoint>` (or `to 
 - to C: your branch is behind `main`: run `git pull origin main` (brings team-sync + settings). The agent cannot run `pnpm install` (settings deny it): the human runs `pnpm install --frozen-lockfile` once in a terminal.
 - to C: `server/utils/auth.ts` compares the cron secret with `===`: please use `timingSafeEqual` (hash both sides with sha256 first).
 - to C: when the UI renders `listing.url` (Buy at retailer), use `rel="noopener noreferrer"`; B now only stores http/https retailer URLs. `APP_URL` must be a public https URL on Vercel or Telegram refuses the inline buttons.
+- to C: `server/lib/events.ts` (`logEvent` catch) still logs the whole error object with `console.warn`; log `e.message` only.
+- to C: after a Telegram link the profile's `telegram_link_token` now ROTATES (single use). `/api/me` must read the CURRENT token each time for `telegramStartUrl` (do not cache it), and the demo reset should not depend on a fixed token.
+- to C: a wishlist item that is `fulfilled` or `paused` can no longer be paid; the deal page should hide "Approve & pay" for those and show the `checkout_in_progress` / `not_allowed` reasons from `data.code`.
 - to C: B's `ws-b-pay` has a script that seeds the local DB from `data.json`; once yours is merged I will run `supabase/seed.ts` on my local Supabase and open your pages against it.
 
 ## Contract changes I need
