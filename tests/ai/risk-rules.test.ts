@@ -91,6 +91,6 @@ describe('scoreRisk details', () => {
   it('templateExplanation lists the signals', () => {
     const { input, duplicateFound } = get('hp-scam-bargain')
     expect(templateExplanation(scoreRisk(input, duplicateFound))).toMatch(/^High risk: .*outside the platform/)
-    expect(templateExplanation(scoreRisk(get('hp-used-ray').input, false))).toBe('No risk signals found.')
+    expect(templateExplanation(scoreRisk(get('hp-used-ray').input, false))).toBe('No significant risk signals.')
   })
 })
