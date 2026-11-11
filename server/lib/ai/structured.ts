@@ -34,6 +34,7 @@ export async function generateStructured<S extends z.ZodTypeAny>(opts: {
         prompt: opts.prompt,
         temperature: opts.temperature ?? 0.3,
         maxRetries: 2, // SDK-level retry for 429/5xx with backoff
+        abortSignal: AbortSignal.timeout(10_000), // a hung model counts as a failed attempt → retry, then the fallback (Vercel allows 60 s per request)
       })
       return { value: result.output as z.infer<S>, usedFallback: false }
     } catch (e) {
