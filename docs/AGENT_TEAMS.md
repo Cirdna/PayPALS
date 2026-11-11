@@ -26,8 +26,8 @@ because the setting has not always been honoured). Run the `git config` line onc
 automatically. Before each push, `git log --format=%B origin/main..HEAD | grep -i "co-authored-by\|claude"` should print nothing.
 What the committed `.claude/settings.json` already does: turns agent teams on, enables Superpowers, sets edit mode to
 auto-accept, pre-approves `pnpm test / typecheck / build / dev`, the seed/eval/spike scripts and `git add <files>` /
-`git commit`, and **blocks** `git push`, `git add -A`, `git reset --hard`, installing packages, reading `.env`, and the
-interactive Superpowers brainstorming skill. Humans push; agents never do.
+`git commit` / `git push`, and **blocks** force-push, `git add -A`, `git reset --hard`, installing packages, reading `.env`,
+and the interactive Superpowers brainstorming skill. Agents may push their own branch; the human lead merges.
 
 Optional:
 - **Split panes:** run Claude inside tmux and start it with `claude --teammate-mode tmux`.

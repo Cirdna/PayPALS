@@ -1,0 +1,28 @@
+#!/bin/sh
+# commit-msg hook: strip any AI attribution from the commit message.
+# Enabled once per clone with:  git config core.hooksPath .githooks
+# Backstop for the CLAUDE.md rule and the "attribution" setting in .claude/settings.json.
+
+msg_file="$1"
+[ -f "$msg_file" ] || exit 0
+
+tmp="$(mktemp)"
+
+# Drop: Co-Authored-By trailers naming Claude/Anthropic, "Generated with Claude Code"
+# lines, and Claude session links.
+grep -viE '^[[:space:]]*co-authored-by:.*(claude|anthropic)|generated with.*claude|claude\.(ai|com)/(code|chat|share)|^[[:space:]]*🤖' "$msg_file" > "$tmp"
+
+# grep exits 1 when every line was dropped; that still leaves a (empty) file, which git rejects.
+cat "$tmp" > "$msg_file"
+rm -f "$tmp"
+
+# Trim trailing blank lines left behind by removed trailers.
+sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' "$msg_file" > "$msg_file.trimmed" && mv "$msg_file.trimmed" "$msg_file"
+
+# Rule: the word "claude" never appears in anything sent to GitHub. Reject, don't rewrite.
+if grep -qi 'claude' "$msg_file"; then
+  echo "commit-msg: commit message contains the word 'claude'. Reword it (say 'the agent' or drop it)." >&2
+  exit 1
+fi
+
+exit 0
