@@ -133,7 +133,11 @@ export async function captureOrder(paypalOrderId: string): Promise<Order> {
   }
 
   if (status !== 'COMPLETED') {
-    unwrap(await db().from('orders').update({ status: 'failed' }).eq('id', row.id), 'fail order')
+    // The return URL and the webhook can race: the other caller may have captured the order while ours failed.
+    // Re-read before declaring failure, and never overwrite a completed order.
+    const latest = unwrap(await db().from('orders').select('*').eq('id', row.id).maybeSingle(), 'reload order') as Row | null
+    if (latest?.status === 'completed') return orderOf(latest)
+    unwrap(await db().from('orders').update({ status: 'failed' }).eq('id', row.id).neq('status', 'completed'), 'fail order')
     await logEvent({ userId: row.user_id, matchId: row.match_id, type: 'order_failed', message: `Payment could not be captured (${detail})`, payload: { paypalOrderId, detail } })
     throw new CheckoutError('capture_failed', `PayPal did not complete the payment (${detail})`)
   }

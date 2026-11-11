@@ -185,6 +185,28 @@ describe('captureOrder', () => {
     expect(eventTypes()).toContain('order_failed')
   })
 
+  it('9c. race: a concurrent capture completed the order while ours failed: returns it, never marks it failed', async () => {
+    execute.mockImplementationOnce(async () => {
+      // the other caller (webhook / return URL) wins the race and finishes first, then PayPal rejects our capture
+      await fake.from('orders').update({ status: 'completed', capture_id: 'CAPTURE-OTHER' }).eq('paypal_order_id', ORDER_ID)
+      throw new Error('ORDER_ALREADY_CAPTURED')
+    })
+    const order = await captureOrder(ORDER_ID)
+    expect(order).toMatchObject({ status: 'completed', captureId: 'CAPTURE-OTHER' })
+    expect(fake.rows('orders')[0]!.status).toBe('completed')
+    expect(eventTypes()).not.toContain('order_failed')
+  })
+
+  it('9d. race: a non-COMPLETED capture result after another caller completed the order is not a failure either', async () => {
+    execute.mockImplementationOnce(async () => {
+      await fake.from('orders').update({ status: 'completed', capture_id: 'CAPTURE-OTHER' }).eq('paypal_order_id', ORDER_ID)
+      return JSON.stringify({ id: ORDER_ID, status: 'PAYER_ACTION_REQUIRED' })
+    })
+    await expect(captureOrder(ORDER_ID)).resolves.toMatchObject({ status: 'completed' })
+    expect(fake.rows('orders')[0]!.status).toBe('completed')
+    expect(eventTypes()).not.toContain('order_failed')
+  })
+
   it('10. unknown order: not_found 404', async () => {
     await expect(captureOrder('UNKNOWN')).rejects.toMatchObject({ code: 'not_found', statusCode: 404 })
   })
