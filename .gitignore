@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Nuxt / Nitro build output
+.nuxt/
+.output/
+.data/
+.nitro/
+.cache/
+dist/
+
+# Secrets — names live in .env.example, values never in git
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Test output
+coverage/
+
+# graphify output — built per-machine; committing it from three branches guarantees merge conflicts
+graphify-out/
+
+# Claude Code personal overrides (the shared .claude/settings.json IS committed)
+.claude/settings.local.json
