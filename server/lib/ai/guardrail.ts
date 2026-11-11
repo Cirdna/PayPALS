@@ -102,7 +102,7 @@ const mentionsOnly = (text: string, allowed: number[]): boolean =>
   mentionedAmounts(text).every((a) => allowed.some((x) => Math.abs(x - a) < 0.005))
 
 /** Words a seller uses when giving away the hidden minimum. */
-const SELLER_LEAK_PATTERN = /floor|minimum|lowest|bottom\s*line|rock[- ]?bottom|can'?t go (any )?(lower|below)/i
+const SELLER_LEAK_PATTERN = /floor|minimum|lowest|bottom[\s-]*line|rock[- ]?bottom|can'?t go (any )?(lower|below)/i
 /** Words a buyer uses when giving away its ceiling. */
 const BUYER_LEAK_PATTERN = /\bmy (max|maximum|limit|budget|ceiling|cap)\b|\bup to \$|\bceiling\b|\bbudget\b|\b(max|maximum) (price|budget)\b|\bupper limit\b|can'?t go (any )?(higher|above|over)/i
 
