@@ -76,4 +76,22 @@ describe('notifyDeal', () => {
     expect(await notifyDeal('m1')).toBe(true)
     expect(fake.rows('matches')[0]!.status).toBe('notified')
   })
+
+  it('loading the listing fails after the claim: still true, sanitised warning, deal_notified event logged', async () => {
+    setup()
+    const realFrom = fake.from.bind(fake)
+    vi.spyOn(fake, 'from').mockImplementation((t: string) => {
+      if (t === 'listings') throw Object.assign(new Error('db exploded'), { secret: 'hunter2' })
+      return realFrom(t)
+    })
+    expect(await notifyDeal('m1')).toBe(true)
+    expect(fake.rows('matches')[0]!.status).toBe('notified')
+    const events = fake.rows('agent_events').filter((e) => e.type === 'deal_notified')
+    expect(events).toHaveLength(1)
+    expect(events[0]!.user_id).toBe(DEMO_USER_ID)
+    const warn = vi.mocked(console.warn)
+    expect(warn).toHaveBeenCalled()
+    for (const call of warn.mock.calls) for (const arg of call) expect(typeof arg).toBe('string')
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('hunter2')
+  })
 })
