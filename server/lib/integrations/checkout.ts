@@ -242,6 +242,6 @@ async function sendReceipt(userId: string, listing: Listing | null, amount: numb
     if (!profile?.telegram_chat_id || !listing) return
     await tg('sendMessage', { chat_id: profile.telegram_chat_id, parse_mode: 'HTML', text: receiptMessage({ listing, amount }) })
   } catch (e) {
-    console.warn('[checkout] telegram receipt failed:', e)
+    console.warn('[checkout] telegram receipt failed:', e instanceof Error ? e.message : 'unknown error')
   }
 }

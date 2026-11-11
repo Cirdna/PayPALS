@@ -10,7 +10,7 @@ export default defineEventHandler(async (event) => {
     await captureOrder(token)
     return sendRedirect(event, `/deals/${order.match_id}?paid=1`)
   } catch (e) {
-    console.warn('[checkout] capture failed:', e)
+    console.warn('[checkout] capture failed:', e instanceof Error ? e.message : 'unknown error')
     return sendRedirect(event, `/deals/${order.match_id}?failed=1`)
   }
 })
