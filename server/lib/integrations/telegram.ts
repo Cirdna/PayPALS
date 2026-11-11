@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import type { Listing, Match, WishlistItem } from '#shared/types'
 import { formatMoney, roundMoney } from '#shared/utils/money'
 import { db, unwrap } from '../db'
@@ -67,13 +68,20 @@ export async function handleUpdate(update: any): Promise<void> {
     if (update?.callback_query) return await handleCallback(update.callback_query)
     const text: unknown = update?.message?.text
     const chatId = update?.message?.chat?.id
-    if (typeof text === 'string' && chatId != null && text.startsWith('/start')) await handleStart(chatId, text)
+    if (typeof text === 'string' && chatId != null && text.startsWith('/start')) {
+      await handleStart(chatId, text, update.message.chat.type === 'private')
+    }
   } catch (e) {
     console.warn('[telegram] handleUpdate failed:', e instanceof Error ? e.message : 'unknown error')
   }
 }
 
-async function handleStart(chatId: number, text: string): Promise<void> {
+async function handleStart(chatId: number, text: string, isPrivate: boolean): Promise<void> {
+  // A link token pasted into a group would hand the profile to everyone in that group: private chats only.
+  if (!isPrivate) {
+    await say(chatId, 'Please open DealHound in a private chat with the bot to link your account.')
+    return
+  }
   const token = text.split(/\s+/)[1]
   const profile = token
     ? (unwrap(await db().from('profiles').select('*').eq('telegram_link_token', token).maybeSingle(), 'load profile by token') as Row | null)
@@ -82,7 +90,12 @@ async function handleStart(chatId: number, text: string): Promise<void> {
     await say(chatId, 'Open Settings in the app and tap “Link Telegram”.')
     return
   }
-  unwrap(await db().from('profiles').update({ telegram_chat_id: chatId }).eq('id', profile.id), 'link telegram')
+  // Rotate the token: a leaked link token is single-use.
+  const rotated = randomBytes(12).toString('hex')
+  unwrap(
+    await db().from('profiles').update({ telegram_chat_id: chatId, telegram_link_token: rotated }).eq('id', profile.id),
+    'link telegram',
+  )
   await say(chatId, "✅ Linked. I'll message you here when I find a deal.")
 }
 
@@ -91,6 +104,10 @@ async function handleCallback(cq: any): Promise<void> {
   const chatId = cq.message?.chat?.id
   const [action, matchId] = String(cq.data ?? '').split(':')
   if (chatId == null || !matchId || (action !== 'pay' && action !== 'skip')) return
+  if (cq.message?.chat?.type !== 'private' || cq.from?.id == null || String(cq.from.id) !== String(chatId)) {
+    await tg('answerCallbackQuery', { callback_query_id: cqId, text: 'Please use this button in a private chat' })
+    return
+  }
 
   const profile = unwrap(await db().from('profiles').select('*').eq('telegram_chat_id', chatId).maybeSingle(), 'load profile by chat') as Row | null
   if (!profile) {
@@ -128,6 +145,13 @@ async function handleCallback(cq: any): Promise<void> {
     })
   } catch (e) {
     const message = e instanceof Error ? e.message : 'unknown error'
-    await say(chatId, `Couldn't start checkout: ${escapeHtml(message)}`)
+    // Only CheckoutError messages are written for end users. A static import of the class would create a cycle
+    // (checkout → telegram), so match on the name.
+    if (e instanceof Error && e.name === 'CheckoutError') {
+      await say(chatId, `Couldn't start checkout: ${escapeHtml(message)}`)
+    } else {
+      console.warn('[telegram] createCheckout failed:', message)
+      await say(chatId, 'Something went wrong creating your PayPal order. Please try again from the app.')
+    }
   }
 }

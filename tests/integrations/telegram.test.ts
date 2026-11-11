@@ -3,6 +3,7 @@ import type { Listing, Match, WishlistItem } from '#shared/types'
 import { setDbForTests } from '~~/server/lib/db'
 import { toCamel } from '~~/server/lib/mappers'
 import { integrations } from '~~/server/lib/integrations'
+import { CheckoutError } from '~~/server/lib/integrations/checkout'
 import { dealMessage, escapeHtml, handleUpdate, receiptMessage, tg } from '~~/server/lib/integrations/telegram'
 import { createFakeDb, type FakeDb } from '../helpers/fake-db'
 import { DEMO_USER_ID, seedTables } from '../helpers/seed-fixture'
@@ -122,22 +123,54 @@ describe('receiptMessage', () => {
 
 describe('handleUpdate: /start', () => {
   it('links the chat with a valid token and confirms', async () => {
-    await handleUpdate({ message: { text: '/start demo-link-token', chat: { id: CHAT } } })
+    await handleUpdate({ message: { text: '/start demo-link-token', chat: { id: CHAT, type: 'private' } } })
     expect(fake.rows('profiles')[0]!.telegram_chat_id).toBe(CHAT)
     const msgs = sent('sendMessage')
     expect(msgs).toHaveLength(1)
     expect(msgs[0].chat_id).toBe(CHAT)
   })
 
+  it('rotates the link token after linking so a leaked token is single-use', async () => {
+    await handleUpdate({ message: { text: '/start demo-link-token', chat: { id: CHAT, type: 'private' } } })
+    expect(fake.rows('profiles')[0]!.telegram_link_token).toMatch(/^[0-9a-f]{24}$/)
+    expect(fake.rows('profiles')[0]!.telegram_link_token).not.toBe('demo-link-token')
+  })
+
+  it('replaying the same token from another chat links nothing and changes nothing', async () => {
+    await handleUpdate({ message: { text: '/start demo-link-token', chat: { id: CHAT, type: 'private' } } })
+    const rotated = fake.rows('profiles')[0]!.telegram_link_token
+    fetchMock.mockClear()
+    await handleUpdate({ message: { text: '/start demo-link-token', chat: { id: 999, type: 'private' } } })
+    expect(fake.rows('profiles')[0]!.telegram_chat_id).toBe(CHAT)
+    expect(fake.rows('profiles')[0]!.telegram_link_token).toBe(rotated)
+  })
+
+  it('a valid unused token may re-link the profile to a new chat (switching phones)', async () => {
+    await fake.from('profiles').update({ telegram_chat_id: 111 }).eq('id', DEMO_USER_ID)
+    await handleUpdate({ message: { text: '/start demo-link-token', chat: { id: CHAT, type: 'private' } } })
+    expect(fake.rows('profiles')[0]!.telegram_chat_id).toBe(CHAT)
+  })
+
+  it('does not link from a group chat, even with a valid token', async () => {
+    await handleUpdate({ message: { text: '/start demo-link-token', chat: { id: -100123, type: 'group' } } })
+    expect(fake.rows('profiles')[0]!.telegram_chat_id).toBeNull()
+    expect(fake.rows('profiles')[0]!.telegram_link_token).toBe('demo-link-token')
+  })
+
+  it('does not link when the chat type is missing', async () => {
+    await handleUpdate({ message: { text: '/start demo-link-token', chat: { id: CHAT } } })
+    expect(fake.rows('profiles')[0]!.telegram_chat_id).toBeNull()
+  })
+
   it('does not link with a wrong token and sends help', async () => {
-    await handleUpdate({ message: { text: '/start wrong-token', chat: { id: CHAT } } })
+    await handleUpdate({ message: { text: '/start wrong-token', chat: { id: CHAT, type: 'private' } } })
     expect(fake.rows('profiles')[0]!.telegram_chat_id).toBeNull()
     expect(sent('sendMessage')).toHaveLength(1)
   })
 })
 
 describe('handleUpdate: callbacks', () => {
-  const cb = (data: string, chat = CHAT) => ({ callback_query: { id: 'cq1', data, message: { chat: { id: chat } } } })
+  const cb = (data: string, chat = CHAT) => ({ callback_query: { id: 'cq1', data, from: { id: chat }, message: { chat: { id: chat, type: 'private' } } } })
 
   it('skip from the owner marks the match skipped', async () => {
     await linkProfile()
@@ -171,11 +204,49 @@ describe('handleUpdate: callbacks', () => {
 
   it('pay reports the error text when checkout fails, without throwing', async () => {
     await linkProfile()
-    vi.spyOn(integrations, 'createCheckout').mockRejectedValue(new Error('Blocked by <mandate>'))
+    vi.spyOn(integrations, 'createCheckout').mockRejectedValue(new CheckoutError('blocked', 'Blocked by <mandate>'))
     await expect(handleUpdate(cb(`pay:${MATCH_ID}`))).resolves.toBeUndefined()
     const msgs = sent('sendMessage')
     expect(msgs).toHaveLength(1)
     expect(msgs[0].text).toContain('Blocked by &lt;mandate&gt;')
+  })
+
+  it('pay does not leak non-checkout error text to the user and logs only the message', async () => {
+    await linkProfile()
+    const warn = vi.mocked(console.warn)
+    const err = new Error('postgres://user:secret@host failed')
+    vi.spyOn(integrations, 'createCheckout').mockRejectedValue(err)
+    await handleUpdate(cb(`pay:${MATCH_ID}`))
+    const msgs = sent('sendMessage')
+    expect(msgs).toHaveLength(1)
+    expect(msgs[0].text).toBe('Something went wrong creating your PayPal order. Please try again from the app.')
+    expect(msgs[0].text).not.toContain('secret')
+    for (const call of warn.mock.calls) for (const arg of call) expect(arg).not.toBe(err)
+  })
+
+  it('pay shows the message of a CheckoutError', async () => {
+    await linkProfile()
+    vi.spyOn(integrations, 'createCheckout').mockRejectedValue(new CheckoutError('blocked', 'Over your limit'))
+    await handleUpdate(cb(`pay:${MATCH_ID}`))
+    expect(sent('sendMessage')[0].text).toContain('Over your limit')
+  })
+
+  it('callback from a group chat does nothing', async () => {
+    await linkProfile()
+    const spy = vi.spyOn(integrations, 'createCheckout')
+    const groupCb = (data: string) => ({ callback_query: { id: 'cq1', data, from: { id: 42 }, message: { chat: { id: CHAT, type: 'group' } } } })
+    await handleUpdate(groupCb(`skip:${MATCH_ID}`))
+    await handleUpdate(groupCb(`pay:${MATCH_ID}`))
+    expect(fake.rows('matches')[0]!.status).toBe('notified')
+    expect(spy).not.toHaveBeenCalled()
+    expect(sent('sendMessage')).toHaveLength(0)
+    expect(sent('answerCallbackQuery').every((b) => b.text === 'Please use this button in a private chat')).toBe(true)
+  })
+
+  it('callback whose sender is not the chat owner does nothing', async () => {
+    await linkProfile()
+    await handleUpdate({ callback_query: { id: 'cq1', data: `skip:${MATCH_ID}`, from: { id: 42 }, message: { chat: { id: CHAT, type: 'private' } } } })
+    expect(fake.rows('matches')[0]!.status).toBe('notified')
   })
 
   it('asks an unlinked chat to link first', async () => {
