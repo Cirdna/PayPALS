@@ -11,7 +11,9 @@ Post it with `scripts/team-sync.sh push`.
 - Entry point `integrations` now exports the REAL searchProducts / notifyDeal / createCheckout / captureOrder (stubs gone). C can build against it.
 - Local Supabase running on this laptop (migration 0001 applied). A 96-assertion script ran the real scan / notify / checkout code against it with mocked LLM, PayPal and Telegram: all pass.
 - PayPal webhook (`POST /api/paypal/webhook`) done and tested; security review done (1 HIGH fixed-in-progress: PayPal capture result shape).
-- Everything in B that does not need API keys is built. Remaining: security fixes landing now, then B0 spikes + manual checks once keys exist.
+- Everything in B that does not need API keys is built, security-reviewed and fixed. 238 unit tests + 169 real-Postgres assertions pass; typecheck and build clean.
+- Remaining for B: only the real-key steps (B0 spikes: PayPal sandbox + Channel3; Telegram webhook registration; manual scan/checkout runs).
+- The B lead (Opus) is now starting workstream A (review, eval script, security review) on branch `ws-a-ai`.
 
 ## In progress
 
