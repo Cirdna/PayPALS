@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NegotiationError } from '~~/server/lib/ai/errors'
 import { setModelForTests } from '~~/server/lib/ai/model'
-import { startNegotiation, stepNegotiation } from '~~/server/lib/ai/negotiation'
+import { fallbackBuyerMove, startNegotiation, stepNegotiation } from '~~/server/lib/ai/negotiation'
 import { setDbForTests } from '~~/server/lib/db'
 import { createFakeDb, type FakeDb } from '../helpers/fake-db'
 import { countingJsonModel, mockFailingModel } from '../helpers/mock-model'
@@ -182,6 +182,23 @@ describe('stepNegotiation', () => {
     expect(fake.rows('negotiations')[0]!.locked_until).toBeNull()
   })
 
+  it('with the model down the buyer still concedes toward its limit and reaches a deal inside the limits', async () => {
+    const n = await startNegotiation('m1')
+    setModelForTests('smart', mockFailingModel())
+    let r = await stepNegotiation(n.id)
+    for (let i = 0; i < 6 && !r.done; i++) r = await stepNegotiation(n.id)
+    expect(r.negotiation.status).toBe('agreed')
+    expect(r.negotiation.round).toBeLessThanOrEqual(6)
+    const price = r.negotiation.agreedPrice as number
+    expect(price).toBeGreaterThanOrEqual(255) // the hidden floor
+    expect(price).toBeLessThanOrEqual(279)    // never above the list price
+    const offers = fake.rows('negotiation_messages').filter((m) => m.role === 'buyer' && m.action === 'offer').map((m) => Number(m.price))
+    expect(offers.length).toBeGreaterThan(1)
+    expect([...offers].sort((a, b) => a - b)).toEqual(offers) // offers never go down
+    expect(Math.max(...offers)).toBeLessThanOrEqual(300)
+    expect(fake.rows('matches')[0]!.status).toBe('agreed')
+  })
+
   it('walks away when the mandate has expired', async () => {
     const n = await startNegotiation('m1')
     await fake.from('mandates').update({ expires_at: '2020-01-01T00:00:00Z' }).eq('id', 'md1')
@@ -356,5 +373,31 @@ describe('fatal guardrail paths and events', () => {
     expect(fake.rows('agent_events')[1]).toMatchObject({ match_id: 'm1', user_id: 'u1', payload: { round: 1, buyerOffer: 250, sellerPrice: 272 } })
     await stepNegotiation(n.id)
     expect(fake.rows('agent_events').map((e) => e.type)).toEqual(['negotiation_started', 'negotiation_round', 'no_deal'])
+  })
+})
+
+describe('fallbackBuyerMove (model unavailable)', () => {
+  const base = { opening: 250, limit: 300, round: 2, maxRounds: 6 }
+  it('round 1 (no previous offer) opens at the opening offer', () => {
+    expect(fallbackBuyerMove({ ...base, round: 1, lastOffer: null, sellerLastPrice: 279 })).toMatchObject({ action: 'offer', price: 250 })
+  })
+  it('raises by a third of the gap, at least $2', () => {
+    expect(fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 274 })).toMatchObject({ action: 'offer', price: 258 })
+    expect(fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 262 })).toMatchObject({ action: 'offer', price: 254 })
+  })
+  it('never offers above the limit and never accepts a price above it', () => {
+    const m = fallbackBuyerMove({ ...base, lastOffer: 295, sellerLastPrice: 340, round: 6 })
+    expect(m).toMatchObject({ action: 'offer', price: 300 })
+    expect(fallbackBuyerMove({ ...base, lastOffer: 300, sellerLastPrice: 340, round: 6 })).toMatchObject({ action: 'offer', price: 300 })
+  })
+  it('accepts the seller price when it is within the limit and close, or in the final round', () => {
+    expect(fallbackBuyerMove({ ...base, lastOffer: 262, sellerLastPrice: 264 })).toMatchObject({ action: 'accept', price: null })
+    expect(fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 290, round: 6 })).toMatchObject({ action: 'accept' })
+    expect(fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 290, round: 3 })).toMatchObject({ action: 'offer' })
+  })
+  it('never mentions the limit in the message', () => {
+    const m = fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 340 })
+    expect(m).toMatchObject({ action: 'offer', price: 280 })
+    expect(m.message).not.toMatch(/300/)
   })
 })

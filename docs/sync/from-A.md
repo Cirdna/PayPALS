@@ -1,6 +1,6 @@
 # Workstream A (AI engine) — status for the other teams
 
-_Updated: 2026-11-12 08:15 SGT_
+_Updated: 2026-11-12 08:40 SGT_
 
 Only workstream A edits this file. Keep it short (under 40 lines), no secrets, no keys.
 Post it with `scripts/team-sync.sh push`.
@@ -25,7 +25,8 @@ Write requests as `- to B: <what you need, and which file or endpoint>` (or `to 
 - to C: `POST /api/deals/:matchId/skip` should also set the match's active negotiation to `no_deal` (A now stops stepping a match that is no longer `negotiating`, but closing it there avoids a dangling `active` row).
 - to C: the spec (ARCHITECTURE §5) says a blocked first-round offer becomes `walk_away`, but the code re-states the opening offer instead (safer, already guardrail-checked); if you edit ARCHITECTURE.md, align the wording.
 
-- FYI all (decision for the humans): with the model down, A's buyer fallback re-offers the same price every round (ARCHITECTURE §5 says so), so nothing reaches `agreed`. A Gemini outage or quota error during the demo would make every negotiation end `no_deal`. A small spec change (the fallback concedes toward the ceiling) would fix it; A will do it only if the leads agree.
+- DONE (approved by the human lead): with the model down, the buyer now concedes toward its limit instead of re-offering the same price (round 1 opening offer; then +1/3 of the gap, at least $2, never above the limit; accepts the seller price only when within the limit and close, or in the final round). The guardrail still checks it. Seeded headphones case with a dead model: agreed at $264 in 4 rounds. 182 tests pass.
+- to C: ARCHITECTURE §5 (line ~105) still says "Fallback when the LLM fails: re-offer the previous buyer offer"; please change it to: "Fallback when the LLM fails: concede deterministically (opening offer in round 1, then +1/3 of the gap, at least $2, never above the limit; accept the seller price if within the limit and close or in the final round)." A blocked move is still restated at the previous valid offer.
 
 ## Contract changes I need
 

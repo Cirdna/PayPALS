@@ -37,6 +37,24 @@ export function openingOffer(item: WishlistItem, listing: Listing, limit: number
   return roundMoney(Math.min(limit, item.targetPrice ?? listing.price * 0.8))
 }
 
+/**
+ * Buyer move used when the model is unavailable (outage, quota, invalid output). Deterministic and conservative:
+ * round 1 opens at the opening offer; later rounds raise by a third of the gap (at least $2) and never above the limit;
+ * the seller's price is accepted only when it is within the limit and either close (within max($5, 3 %)) or in the final round.
+ * The guardrail still checks whatever this returns. The message never states the limit.
+ */
+export function fallbackBuyerMove(p: { opening: number; lastOffer: number | null; sellerLastPrice: number; limit: number; round: number; maxRounds: number }): BuyerDecision {
+  const { opening, lastOffer, sellerLastPrice, limit, round, maxRounds } = p
+  if (lastOffer === null) return { action: 'offer', price: opening, message: `My offer is ${formatMoney(opening)}.` }
+  const close = sellerLastPrice - lastOffer <= Math.max(5, sellerLastPrice * 0.03)
+  if (sellerLastPrice <= limit && (close || round >= maxRounds)) {
+    return { action: 'accept', price: null, message: `That works for me, I'll take it at ${formatMoney(sellerLastPrice)}.` }
+  }
+  const raised = roundMoney(Math.min(limit, lastOffer + Math.max(2, (sellerLastPrice - lastOffer) / 3)))
+  const price = Math.max(lastOffer, raised)
+  return { action: 'offer', price, message: `My offer is ${formatMoney(price)}.` }
+}
+
 export async function startNegotiation(matchId: string): Promise<Negotiation> {
   const match = unwrap(await db().from('matches').select('*').eq('id', matchId).maybeSingle(), 'load match') as Row | null
   if (!match) throw new NegotiationError('not_found', `Match ${matchId} not found`)
@@ -166,7 +184,7 @@ async function runRound(neg: Row): Promise<NegotiationStepResponse> {
   })
   const proposed = await generateStructured({
     kind: 'smart', schema: buyerSchema, system: bp.system, prompt: bp.prompt,
-    fallback: { action: 'offer', price: fallbackPrice, message: `My offer is ${formatMoney(fallbackPrice)}.` },
+    fallback: fallbackBuyerMove({ opening, lastOffer, sellerLastPrice, limit, round: n, maxRounds }),
   })
   let decision: BuyerDecision = { ...proposed.value, price: isValidPrice(proposed.value.price) ? roundMoney(proposed.value.price) : proposed.value.price }
   const check = (d: BuyerDecision) => checkBuyerDecision({ decision: d, mandate, item, listingCurrency: listing.currency, previousBuyerOffers, sellerLastPrice, round: n, maxRounds })
