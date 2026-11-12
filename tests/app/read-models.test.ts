@@ -48,4 +48,25 @@ describe('resetUserData', () => {
     expect(fake.rows('wishlist_items').every((w) => w.status === 'active' && w.last_scanned_at === null)).toBe(true)
     expect(fake.rows('listings').length).toBeGreaterThan(0) // marketplace data is untouched
   })
+  it('removes the user generated listings and their secrets, leaving other users and seeded ones', async () => {
+    const base = seedTables()
+    const gen = (id: string, ext: string) => ({ id, source: 'marketplace', external_id: ext, title: 't', price: 1 })
+    const fake = createFakeDb({
+      ...base,
+      listings: [...base.listings, gen('g1', 'gen:wl-headphones:0'), gen('g2', 'gen:wl-headphones:1'), gen('g3', 'gen:someone-elses-item:0')],
+      listing_secrets: [...base.listing_secrets, { listing_id: 'g1', floor_price: 1, scripted_messages: [] }, { listing_id: 'g2', floor_price: 1, scripted_messages: [] }, { listing_id: 'g3', floor_price: 1, scripted_messages: [] }],
+      matches: [{ id: 'm1', wishlist_item_id: 'wl-headphones', listing_id: 'g1', status: 'ready' }],
+    })
+    setDbForTests(fake)
+    await resetUserData(DEMO_USER_ID)
+    const ids = fake.rows('listings').map((l) => l.id)
+    expect(ids).not.toContain('g1')
+    expect(ids).not.toContain('g2')
+    expect(ids).toContain('g3')
+    expect(ids).toHaveLength(base.listings.length + 1)
+    const secretIds = fake.rows('listing_secrets').map((s) => s.listing_id)
+    expect(secretIds).toEqual(expect.arrayContaining(['g3']))
+    expect(secretIds).not.toContain('g1')
+    expect(secretIds).toHaveLength(base.listing_secrets.length + 1)
+  })
 })
