@@ -6,6 +6,7 @@ import { AgGridVue } from 'ag-grid-vue3'
 import {
   AllCommunityModule,
   ModuleRegistry,
+  colorSchemeDark,
   themeQuartz,
   type CellClassParams,
   type ColDef,
@@ -20,6 +21,19 @@ import RiskBadge from './RiskBadge.vue'
 import StatusChip from './StatusChip.vue'
 
 ModuleRegistry.registerModules([AllCommunityModule])
+
+// Follow the app's light/dark mode and use Nuxt UI's colours so the grid blends into the page.
+const colorMode = useColorMode()
+const theme = computed(() =>
+  (colorMode.value === 'dark' ? themeQuartz.withPart(colorSchemeDark) : themeQuartz).withParams({
+    backgroundColor: 'var(--ui-bg)',
+    foregroundColor: 'var(--ui-text)',
+    headerBackgroundColor: 'var(--ui-bg-muted)',
+    borderColor: 'var(--ui-border)',
+    accentColor: 'var(--ui-primary)',
+    fontFamily: 'inherit',
+  }),
+)
 
 withDefaults(defineProps<{ rows: DealRow[]; quickFilterText?: string }>(), { quickFilterText: '' })
 const emit = defineEmits<{ open: [matchId: string] }>()
@@ -50,27 +64,26 @@ const signClass = (p: CellClassParams<DealRow, number>) => {
   return classes
 }
 
-const columnDefs: ColDef<DealRow>[] = [
-  { field: 'wishlistTitle', headerName: 'Wishlist', pinned: 'left', minWidth: 170, cellClass: 'deal-strong' },
-  { field: 'listingTitle', headerName: 'Listing', flex: 2, minWidth: 220, tooltipField: 'listingTitle' },
+// Pinned columns only make sense when there is room: on a phone they would fill the whole grid.
+const roomy = ref(true)
+onMounted(() => {
+  const mq = window.matchMedia('(min-width: 768px)')
+  roomy.value = mq.matches
+  mq.addEventListener('change', (e) => {
+    roomy.value = e.matches
+  })
+})
+
+const columnDefs = computed<ColDef<DealRow>[]>(() => [
+  { field: 'wishlistTitle', hide: !roomy.value, headerName: 'Wishlist', pinned: roomy.value ? 'left' : null, width: 150, cellClass: 'deal-strong' },
+  { field: 'listingTitle', headerName: 'Listing', flex: 1, minWidth: 190, tooltipField: 'listingTitle' },
+  // Money first: this is what the board is for.
   {
-    field: 'source',
-    headerName: 'Source',
-    width: 130,
-    valueFormatter: (p: ValueFormatterParams<DealRow, DealRow['source']>) => (p.value ? SOURCE_LABEL[p.value] : dash),
-  },
-  { field: 'sellerOrRetailer', headerName: 'Seller / retailer', minWidth: 150 },
-  {
-    field: 'condition',
-    headerName: 'Condition',
-    width: 120,
-    valueFormatter: (p: ValueFormatterParams<DealRow, DealRow['condition']>) => (p.value ? CONDITION_LABEL[p.value] : dash),
-  },
-  {
-    field: 'listPrice',
+    field: 'listPrice', hide: !roomy.value,
     headerName: 'List price',
     valueFormatter: money,
-    width: 120,
+    width: 108,
+    suppressHeaderFilterButton: true,
     cellClass: 'ag-right-aligned-cell',
     headerClass: 'ag-right-aligned-header',
   },
@@ -78,7 +91,8 @@ const columnDefs: ColDef<DealRow>[] = [
     field: 'bestPrice',
     headerName: 'Best price',
     valueFormatter: money,
-    width: 120,
+    width: 108,
+    suppressHeaderFilterButton: true,
     cellClass: ['ag-right-aligned-cell', 'deal-strong'],
     headerClass: 'ag-right-aligned-header',
   },
@@ -87,44 +101,62 @@ const columnDefs: ColDef<DealRow>[] = [
     headerName: 'Savings',
     valueFormatter: signedMoney,
     sort: 'desc',
-    width: 115,
+    width: 112,
+    suppressHeaderFilterButton: true,
     cellClass: signClass,
     headerClass: 'ag-right-aligned-header',
   },
   {
-    field: 'savingsVsMax',
+    field: 'savingsVsMax', hide: !roomy.value,
     headerName: 'vs. limit',
     headerTooltip: 'Your maximum price minus the best price (negative = over your limit)',
     valueFormatter: signedMoney,
-    width: 115,
+    width: 108,
+    suppressHeaderFilterButton: true,
     cellClass: signClass,
     headerClass: 'ag-right-aligned-header',
   },
+  { field: 'sellerOrRetailer', hide: !roomy.value, headerName: 'Seller / retailer', minWidth: 140 },
+  {
+    field: 'source', hide: !roomy.value,
+    headerName: 'Source',
+    width: 115,
+    valueFormatter: (p: ValueFormatterParams<DealRow, DealRow['source']>) => (p.value ? SOURCE_LABEL[p.value] : dash),
+  },
+  {
+    field: 'condition', hide: !roomy.value,
+    headerName: 'Condition',
+    width: 110,
+    valueFormatter: (p: ValueFormatterParams<DealRow, DealRow['condition']>) => (p.value ? CONDITION_LABEL[p.value] : dash),
+  },
+  {
+    field: 'updatedAt', hide: !roomy.value,
+    headerName: 'Updated',
+    width: 120,
+    valueFormatter: (p: ValueFormatterParams<DealRow, string>) => relativeTime(p.value),
+    tooltipValueGetter: (p) => (p.value ? new Date(p.value as string).toLocaleString() : ''),
+  },
+  // Pinned right: the verdict stays visible while the rest scrolls.
   {
     field: 'riskScore',
     headerName: 'Risk',
-    width: 160,
+    width: 140,
+    pinned: roomy.value ? 'right' : null,
     cellRenderer: RiskBadgeCell,
     cellClass: 'deal-cell-center',
-    // Filter/sort on the level text, display the badge.
+    // Filter on the level text, display the badge.
     filterValueGetter: (p) => p.data?.riskLevel ?? '',
   },
   {
     field: 'status',
     headerName: 'Status',
-    width: 215,
+    width: 195,
+    pinned: roomy.value ? 'right' : null,
     cellRenderer: StatusChipCell,
     cellClass: 'deal-cell-center',
     filterValueGetter: (p) => (p.data ? STATUS_LABEL[p.data.status].label : ''),
   },
-  {
-    field: 'updatedAt',
-    headerName: 'Updated',
-    width: 130,
-    valueFormatter: (p: ValueFormatterParams<DealRow, string>) => relativeTime(p.value),
-    tooltipValueGetter: (p) => (p.value ? new Date(p.value as string).toLocaleString() : ''),
-  },
-]
+])
 
 const defaultColDef: ColDef<DealRow> = { sortable: true, resizable: true, filter: true }
 
@@ -141,7 +173,7 @@ const getRowId = (p: GetRowIdParams<DealRow>) => p.data.matchId
     <AgGridVue
       style="width: 100%"
       dom-layout="autoHeight"
-      :theme="themeQuartz"
+      :theme="theme"
       :row-data="rows"
       :column-defs="columnDefs"
       :default-col-def="defaultColDef"

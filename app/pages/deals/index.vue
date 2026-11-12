@@ -35,7 +35,7 @@ const open = (matchId: string) => navigateTo(`/deals/${matchId}`)
 </script>
 
 <template>
-  <UContainer class="space-y-6 py-8">
+  <UContainer class="max-w-[1600px] space-y-6 py-8">
     <div class="flex flex-wrap items-end justify-between gap-4">
       <div>
         <h1 class="text-2xl font-semibold tracking-tight">Deals</h1>
@@ -61,7 +61,7 @@ const open = (matchId: string) => navigateTo(`/deals/${matchId}`)
       </div>
     </div>
 
-    <div class="grid gap-6 lg:grid-cols-[minmax(0,1fr)_20rem]">
+    <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_18rem]">
       <section class="min-w-0">
         <UAlert
           v-if="status === 'error'"
