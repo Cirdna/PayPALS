@@ -1,9 +1,10 @@
 import type { Listing, ListingDraft, MatchVerdict, RiskAssessment, ScanResponse, Seller, WishlistItem } from '#shared/types'
 import { formatMoney, meetsCondition, roundMoney } from '#shared/utils/money'
-import { ai, MatcherUnavailableError } from '~~/server/lib/ai'
+import { ai, isGenerated, MatcherUnavailableError } from '~~/server/lib/ai'
 import { db, unwrap } from '../db'
 import { logEvent } from '../events'
 import { toCamel, toSnake } from '../mappers'
+import { ensureGeneratedListings } from './generated-listings'
 import { integrations } from './index'
 
 type Row = Record<string, any>
@@ -123,10 +124,14 @@ async function scanItem(row: Row, out: ScanResponse, overBudget: () => boolean):
 
   // 3. marketplace candidates
   const marketplace = unwrap(await db().from('listings').select('*').eq('source', 'marketplace'), 'load marketplace listings') as Row[]
-  const marketRows = marketplace
-    .filter((r) => keywordMatch(item.query, r.title))
-    .sort((a, b) => Number(a.price) - Number(b.price))
-    .slice(0, MAX_MARKETPLACE_CANDIDATES)
+  const seededRows = marketplace.filter((r) => !isGenerated(r.external_id) && keywordMatch(item.query, r.title))
+  let generatedRows: Row[] = []
+  try {
+    generatedRows = await ensureGeneratedListings(item, marketplace, seededRows.length, overBudget)
+  } catch (e) {
+    console.warn('[scan] listing generation failed:', errMsg(e))
+  }
+  const marketRows = [...seededRows, ...generatedRows].sort((a, b) => Number(a.price) - Number(b.price)).slice(0, MAX_MARKETPLACE_CANDIDATES)
 
   // 4. drop pairs that already have a match row (the LLM cache)
   const existing = unwrap(await db().from('matches').select('*').eq('wishlist_item_id', item.id), 'load matches') as Row[]
