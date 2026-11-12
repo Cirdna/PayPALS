@@ -308,6 +308,7 @@ useHead({ title: computed(() => (listing.value ? `${listing.value.title} · Deal
           icon="i-lucide-circle-check"
           :title="`Purchased for ${formatMoney(order?.amount ?? bestPrice)}`"
           description="Paid with PayPal. Nothing more to do."
+          :actions="[{ label: 'All purchases', color: 'success', variant: 'outline', to: '/purchases' }]"
         />
         <UAlert
           v-else-if="(state === 'agreed' || state === 'notified') && payable && !itemActive"
