@@ -15,6 +15,16 @@ const cooldownUntil: Partial<Record<ModelKind, number>> = {}
 export function resetCooldownsForTests(): void {
   for (const k of Object.keys(cooldownUntil) as ModelKind[]) delete cooldownUntil[k]
 }
+/** Longest advertised wait we are willing to sleep through (once) before retrying; longer goes to the fallback. */
+const MAX_WAIT_MS = 8_000
+/** Providers say how long to wait: a `retry-after` header (seconds) or "Please try again in 435ms / 3.8s". null = unknown. */
+export function retryAfterMs(e: unknown): number | null {
+  const header = (e as { responseHeaders?: Record<string, string> } | null)?.responseHeaders?.['retry-after']
+  if (header && Number.isFinite(Number(header))) return Math.round(Number(header) * 1000)
+  const m = /try again in ([\d.]+)\s*(ms|s)\b/i.exec(e instanceof Error ? e.message : String(e))
+  if (!m) return null
+  return Math.round(Number(m[1]) * (m[2]!.toLowerCase() === 'ms' ? 1 : 1000))
+}
 const isRateLimit = (e: unknown): boolean => {
   const status = (e as { statusCode?: number } | null)?.statusCode
   const msg = e instanceof Error ? e.message : String(e)
@@ -54,8 +64,14 @@ export async function generateStructured<S extends z.ZodTypeAny>(opts: {
       return { value: result.output as z.infer<S>, usedFallback: false }
     } catch (e) {
       lastError = e instanceof Error ? e.message : String(e)
-      if (isRateLimit(e)) { // retrying cannot help and only burns time and quota
-        cooldownUntil[opts.kind] = Date.now() + COOLDOWN_MS
+      if (isRateLimit(e)) {
+        const wait = retryAfterMs(e)
+        if (wait !== null && wait <= MAX_WAIT_MS && i < attempts - 1) { // a short per-minute limit: wait it out once, then retry
+          await new Promise((r) => setTimeout(r, wait + 50))
+          continue
+        }
+        // a long limit / daily quota: retrying cannot help and only burns time and quota
+        cooldownUntil[opts.kind] = Date.now() + (wait !== null && wait <= MAX_WAIT_MS ? wait + 500 : COOLDOWN_MS)
         break
       }
     }

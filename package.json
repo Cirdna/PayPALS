@@ -22,6 +22,7 @@
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.117",
+    "@ai-sdk/groq": "^4.0.81",
     "@channel3/sdk": "^4.9.0",
     "@iconify-json/lucide": "^1.2.0",
     "@nuxt/ui": "^4.12.0",

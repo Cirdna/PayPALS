@@ -1,7 +1,7 @@
 /**
  * Eval for the AI engine (plan A3/A4).  Owner: A.
  *
- *   pnpm eval:negotiation              real Supabase + real Gemini (needs GOOGLE_GENERATIVE_AI_API_KEY in .env)
+ *   pnpm eval:negotiation              real Supabase + real model (needs GROQ_API_KEY in .env, or AI_PROVIDER=google + GOOGLE_GENERATIVE_AI_API_KEY)
  *   pnpm eval:negotiation -- --mock    same flow, NO network and no key: mock models, LOCAL Supabase (127.0.0.1:55321) only
  *
  * Part 1: matcher accuracy against `expected.match` in supabase/seed/data.json.
@@ -13,6 +13,7 @@ import { MockLanguageModelV4 } from 'ai/test'
 import type { LanguageModel } from 'ai'
 import seed from '../supabase/seed/data.json'
 import { db, unwrap } from '~~/server/lib/db'
+import { env } from '~~/server/lib/env'
 import { matchListings } from '~~/server/lib/ai/matcher'
 import { setModelForTests } from '~~/server/lib/ai/model'
 import { startNegotiation, stepNegotiation } from '~~/server/lib/ai/negotiation'
@@ -47,8 +48,9 @@ function safetyChecks(): void {
       refuseToStart(`--mock only runs against local Supabase on port ${MOCK_SUPABASE_PORT} (got host "${u.hostname}" port "${u.port || 'default'}")`)
     }
   } else {
-    const key = process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? ''
-    if (!key || key.startsWith('placeholder')) refuseToStart('GOOGLE_GENERATIVE_AI_API_KEY is missing or a placeholder. Set a real key in .env, or run with --mock.')
+    const keyName = (process.env.AI_PROVIDER || 'groq') === 'google' ? 'GOOGLE_GENERATIVE_AI_API_KEY' : 'GROQ_API_KEY'
+    const key = process.env[keyName] ?? ''
+    if (!key || key.startsWith('placeholder')) refuseToStart(`${keyName} is missing or a placeholder. Set a real key in .env, or run with --mock.`)
   }
 }
 
@@ -290,7 +292,8 @@ async function evalOne(s: SeedListing, realItem: WishlistItem, realMandate: Mand
   let item = realItem
   let mandate = realMandate
   const limit = Math.min(item.maxPrice, mandate.maxAmount)
-  const words = [...new Set([item.maxPrice, mandate.maxAmount, limit])].map((x) => String(x))
+  // an amount equal to the seller's own asking price is not a leak: the seller already knows it (e.g. "I accept $300" at a $300 listing)
+  const words = [...new Set([item.maxPrice, mandate.maxAmount, limit])].filter((x) => x !== listing.price).map((x) => String(x))
   const out: Outcome = {
     key: s.key, theme: s.theme, list: listing.price, floor: s.floorPrice, target: item.targetPrice, max: item.maxPrice, limitWords: words,
     result: 'error', agreed: null, rounds: 0, blocked: 0, flagged: 0, stepSecs: [], buyerMessages: [], guardrailMessages: [], ceilingLeaks: [],
@@ -314,6 +317,8 @@ async function evalOne(s: SeedListing, realItem: WishlistItem, realMandate: Mand
     let last = neg
     let done = false
     for (let i = 0; i < MAX_STEPS && !done; i++) {
+      // free-tier providers cap tokens per minute per model; real mode spaces steps out (EVAL_PACE_MS, default 9 s) so the eval measures the model, not the quota
+      if (!MOCK && i + everNegotiationIds.length > 1) await new Promise((r) => setTimeout(r, Number(process.env.EVAL_PACE_MS ?? 9000)))
       const t0 = Date.now()
       const step = await stepNegotiation(neg.id)
       out.stepSecs.push((Date.now() - t0) / 1000)
@@ -331,6 +336,7 @@ async function evalOne(s: SeedListing, realItem: WishlistItem, realMandate: Mand
     out.buyerMessages = msgs.filter((x) => x.role === 'buyer')
     out.guardrailMessages = msgs.filter((x) => x.role === 'guardrail')
     for (const bm of out.buyerMessages) {
+      if (bm.action === 'accept') continue // accepting is judged at the seller's own price, which the seller already knows
       for (const w of words) {
         if (new RegExp(`\\$\\s?${w}(?:\\.0+)?(?![\\d.]*\\d)`).test(bm.message)) out.ceilingLeaks.push(`round ${bm.round}: "${bm.message}"`)
       }
@@ -427,12 +433,12 @@ async function main(): Promise<number> {
   safetyChecks()
   if (MOCK) {
     console.log('############################################################')
-    console.log('MOCK MODE: results say nothing about Gemini')
+    console.log('MOCK MODE: results say nothing about the real model')
     console.log('(mock models, local Supabase only; this checks the eval plumbing, not prompt quality)')
     console.log('############################################################')
     installMockModels()
   } else {
-    console.log(`REAL MODE: model smart=${process.env.AI_MODEL_SMART || 'gemini-flash-latest'} fast=${process.env.AI_MODEL_FAST || 'gemini-flash-lite-latest'}`)
+    console.log(`REAL MODE: provider=${env.aiProvider} smart=${env.aiModelSmart} fast=${env.aiModelFast}`)
   }
 
   const items = new Map<string, WishlistItem>()
@@ -472,7 +478,7 @@ async function main(): Promise<number> {
 
   const leftover = await countLeftovers()
   const checks = buildChecklist(matcher, outs, leftover)
-  console.log(`\n=== A4 ACCEPTANCE CHECKLIST${MOCK ? ' (MOCK MODE: results say nothing about Gemini)' : ''} ===`)
+  console.log(`\n=== A4 ACCEPTANCE CHECKLIST${MOCK ? ' (MOCK MODE: results say nothing about the real model)' : ''} ===`)
   for (const c of checks) console.log(`${c.ok ? 'PASS' : 'FAIL'}  ${c.name}  [${c.detail}]`)
   const failed = checks.filter((c) => !c.ok).length
   console.log(failed === 0 ? '\nALL CHECKS PASSED' : `\n${failed} CHECK(S) FAILED`)

@@ -1,6 +1,6 @@
 # Workstream A (AI engine) — status for the other teams
 
-_Updated: 2026-11-12 10:20 SGT_
+_Updated: 2026-11-12 19:15 SGT_
 
 Only workstream A edits this file. Keep it short (under 40 lines), no secrets, no keys.
 Post it with `scripts/team-sync.sh push`.
@@ -18,8 +18,7 @@ Post it with `scripts/team-sync.sh push`.
 
 ## In progress
 
-- Nothing in A needs more code until a Gemini key exists.
-- A2 (smoke test the routes with the real model) and A4 (prompt tuning to the acceptance list) are waiting for the key.
+- Nothing. A is complete: A4 passed 3 consecutive real-model runs on Groq (all checks, 0 fallbacks, matcher 0/21 wrong, median step about 2 s).
 
 ## Blocked / needs help
 
@@ -29,6 +28,10 @@ Write requests as `- to B: <what you need, and which file or endpoint>` (or `to 
 
 - DONE (approved by the human lead): with the model down, the buyer now concedes toward its limit instead of re-offering the same price (round 1 opening offer; then +1/3 of the gap, at least $2, never above the limit; accepts the seller price only when within the limit and close, or in the final round). The guardrail still checks it. Seeded headphones case with a dead model: agreed at $264 in 4 rounds. 182 tests pass.
 - to C: ARCHITECTURE §5 (line ~105) still says "Fallback when the LLM fails: re-offer the previous buyer offer"; please change it to: "Fallback when the LLM fails: concede deterministically (opening offer in round 1, then +1/3 of the gap, at least $2, never above the limit; accept the seller price if within the limit and close or in the final round)." A blocked move is still restated at the previous valid offer.
+
+- LLM PROVIDER IS NOW GROQ (human lead's decision). Every laptop: `git pull`, then `pnpm install --frozen-lockfile` (adds `@ai-sdk/groq`), and put `GROQ_API_KEY` in `.env`. Optional: `AI_PROVIDER=google` switches back to Gemini; `AI_MODEL_SMART` / `AI_MODEL_FAST` override the ids (defaults gpt-oss-20b / gpt-oss-120b).
+- to C: A edited `server/lib/env.ts` (your file, with the human lead's OK) to add `aiProvider` + `groqApiKey` and the Groq default model ids; `package.json` / `pnpm-lock.yaml` gained `@ai-sdk/groq`. Please keep these when you merge.
+- to C: add `GROQ_API_KEY` and `AI_PROVIDER` to `.env.example`, and in `server/api/health.get.ts` report the LLM as configured when `GROQ_API_KEY` is set (it only checks the Gemini key today). STACK_NOTES should say the provider is Groq via `@ai-sdk/groq`.
 
 ## Contract changes I need
 

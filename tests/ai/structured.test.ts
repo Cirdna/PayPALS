@@ -3,7 +3,7 @@ import { MockLanguageModelV4 } from 'ai/test'
 import type { LanguageModel } from 'ai'
 import { z } from 'zod'
 import { setModelForTests } from '~~/server/lib/ai/model'
-import { generateStructured, resetCooldownsForTests, untrusted } from '~~/server/lib/ai/structured'
+import { generateStructured, resetCooldownsForTests, retryAfterMs, untrusted } from '~~/server/lib/ai/structured'
 import { mockFailingModel, mockJsonModel } from '../helpers/mock-model'
 
 const schema = z.object({ action: z.enum(['offer', 'accept', 'walk_away']), price: z.number().nullable(), message: z.string() })
@@ -106,5 +106,35 @@ describe('rate limits (429 / quota)', () => {
     setModelForTests('smart', mockJsonModel([{ action: 'offer', price: 300, message: 'hi' }]))
     const r = await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
     expect(r.usedFallback).toBe(false)
+  })
+})
+
+describe('short rate limits (Groq tokens-per-minute: "try again in 3.8s")', () => {
+  const limited = (hint: string, then: unknown) => {
+    let calls = 0
+    const err = Object.assign(new Error(`Rate limit reached for model x on tokens per minute (TPM): Limit 8000. Please try again in ${hint}.`), { statusCode: 429 })
+    const ok = mockJsonModel([then])
+    const model = new MockLanguageModelV4({
+      doGenerate: async (o: unknown) => { calls++; if (calls === 1) throw err; return (ok as unknown as { doGenerate: (x: unknown) => Promise<unknown> }).doGenerate(o) },
+    } as never) as unknown as LanguageModel
+    return { model, calls: () => calls }
+  }
+  it('waits the advertised time once and retries, instead of dropping to the fallback', async () => {
+    const m = limited('30ms', { action: 'offer', price: 300, message: 'hi' }); setModelForTests('smart', m.model)
+    const r = await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    expect(r.usedFallback).toBe(false)
+    expect(m.calls()).toBe(2)
+  })
+  it('a long advertised wait goes straight to the fallback with a cooldown (no sleeping)', async () => {
+    const m = limited('45s', { action: 'offer', price: 300, message: 'hi' }); setModelForTests('smart', m.model)
+    const r = await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    expect(r.usedFallback).toBe(true)
+    expect(m.calls()).toBe(1)
+  })
+  it('parses ms and seconds hints', () => {
+    expect(retryAfterMs(new Error('Please try again in 435ms.'))).toBe(435)
+    expect(retryAfterMs(new Error('Please try again in 3.8475s.'))).toBe(3848)
+    expect(retryAfterMs(new Error('quota exceeded'))).toBeNull()
+    expect(retryAfterMs(Object.assign(new Error('x'), { responseHeaders: { 'retry-after': '2' } }))).toBe(2000)
   })
 })

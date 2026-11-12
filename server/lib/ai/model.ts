@@ -1,4 +1,5 @@
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
+import { createGroq } from '@ai-sdk/groq'
 import type { LanguageModel } from 'ai'
 import { env } from '../env'
 
@@ -20,6 +21,7 @@ export function setModelForTests(kind: ModelKind, model: LanguageModel | null): 
 export function getModel(kind: ModelKind): LanguageModel {
   const override = overrides[kind]
   if (override) return override
-  const google = createGoogleGenerativeAI({ apiKey: env.googleApiKey })
-  return google(kind === 'smart' ? env.aiModelSmart : env.aiModelFast)
+  const id = kind === 'smart' ? env.aiModelSmart : env.aiModelFast
+  if (env.aiProvider === 'google') return createGoogleGenerativeAI({ apiKey: env.googleApiKey })(id)
+  return createGroq({ apiKey: env.groqApiKey })(id)
 }
