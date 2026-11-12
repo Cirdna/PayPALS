@@ -1,6 +1,7 @@
 import type { H3Event } from 'h3'
 import { createError } from 'h3'
 import { serverSupabaseUser } from '#supabase/server'
+import { isBearer } from '../lib/secure-compare'
 
 export interface AuthUser { id: string; email: string | null }
 
@@ -16,7 +17,5 @@ export async function requireUser(event: H3Event): Promise<AuthUser> {
 
 /** true when the request carries `Authorization: Bearer <CRON_SECRET>` (used by pg_cron). */
 export function isCronRequest(event: H3Event): boolean {
-  const header = getHeader(event, 'authorization') ?? ''
-  const secret = process.env.CRON_SECRET
-  return !!secret && header === `Bearer ${secret}`
+  return isBearer(getHeader(event, 'authorization'), process.env.CRON_SECRET)
 }

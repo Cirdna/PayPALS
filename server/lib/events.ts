@@ -22,6 +22,6 @@ export async function logEvent(e: {
     })
     if (error) console.warn(`[events] could not log ${e.type}: ${error.message}`)
   } catch (err) {
-    console.warn(`[events] could not log ${e.type}:`, err)
+    console.warn(`[events] could not log ${e.type}: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
