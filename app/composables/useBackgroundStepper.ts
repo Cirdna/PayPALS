@@ -8,6 +8,8 @@ import type { DealRow } from '#shared/types'
  * board can refresh even when Realtime is not available.
  */
 export function useBackgroundStepper(rows: Readonly<Ref<DealRow[]>>, onStepped?: () => void) {
+  // The board steps in the background: a bit slower than the deal page so both together stay inside the model's rate limit.
+  const backgroundPauseMs = () => Math.round((Number(useRuntimeConfig().public.negotiationStepPauseMs) || 6000) * 1.5)
   let stopped = false
   const ids = new Map<string, string>() // matchId -> negotiationId
 
@@ -26,7 +28,7 @@ export function useBackgroundStepper(rows: Readonly<Ref<DealRow[]>>, onStepped?:
           /* the deal page shows errors; the board just retries */
         }
       }
-      await new Promise((r) => setTimeout(r, 2500))
+      await new Promise((r) => setTimeout(r, backgroundPauseMs()))
     }
   }
 

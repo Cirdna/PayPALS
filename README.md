@@ -31,17 +31,17 @@ PayPal checkout applies to marketplace listings.
 ## How AI is used
 | Component | Model | Role |
 |---|---|---|
-| Matcher | Gemini (fast) | One structured call per batch of listings: is this really the wanted item? |
-| Risk explanation | Gemini (smart) | Turns computed signals into a short explanation (signals and scores are computed in code) |
-| Buyer agent | Gemini (smart) | Structured offers under the guardrail |
-| Seller agents | Gemini (smart) | Demo marketplace counterparties with personas and hidden floor prices |
-| Checkout agent | Gemini (fast) | Calls the guarded PayPal toolkit tool |
+| Matcher | Groq `openai/gpt-oss-120b` | One structured call per batch of listings: is this really the wanted item? |
+| Risk explanation | Groq `openai/gpt-oss-20b` | Turns computed signals into a short explanation (signals and scores are computed in code) |
+| Buyer agent | Groq `openai/gpt-oss-20b` | Structured offers under the guardrail |
+| Seller agents | Groq `openai/gpt-oss-20b` | Demo marketplace counterparties with personas and hidden floor prices |
+| Checkout agent | Groq `openai/gpt-oss-120b` | Calls the guarded PayPal toolkit tool |
 
-All model access goes through the Vercel AI SDK (`ai` + `@ai-sdk/google`); model ids are environment variables.
+All model access goes through the Vercel AI SDK (`ai` + `@ai-sdk/groq`) in one file (`server/lib/ai/model.ts`), so the provider is a setting: `AI_PROVIDER=groq` (default) or `google` (Gemini via `@ai-sdk/google`). Every model answer is schema-validated and has a deterministic fallback, so the app keeps working through rate limits.
 
 ## Tech stack
 Nuxt 4 (Vue 3, TypeScript) · Nuxt UI · **AG Grid** (Deals board) · Supabase (Postgres, Auth, Realtime, pg_cron) ·
-Vercel AI SDK + Gemini · PayPal Agent Toolkit (sandbox) · **Channel3** product search · Telegram Bot API · Vercel · Vitest.
+Vercel AI SDK + Groq (`gpt-oss`) · PayPal Agent Toolkit (sandbox) · **Channel3** product search · Telegram Bot API · Vercel · Vitest.
 
 ```mermaid
 flowchart LR
@@ -49,7 +49,7 @@ flowchart LR
   CRON[Supabase pg_cron] -->|POST /api/scan| API
   API --> C3[Channel3]
   API --> MP[(Demo marketplace)]
-  API --> AI[Gemini: match / explain / negotiate]
+  API --> AI[Groq LLMs: match / explain / negotiate]
   API --> G{{Code guardrail + mandate}}
   G --> PP[PayPal Agent Toolkit]
   API --> TG[Telegram]
@@ -61,7 +61,7 @@ Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ```bash
 # Node 20+, pnpm 10
 pnpm install
-cp .env.example .env            # fill in the values (Supabase, Gemini, PayPal sandbox, Channel3, Telegram)
+cp .env.example .env            # fill in the values (Supabase, Groq, PayPal sandbox, Channel3, Telegram)
 # Supabase SQL editor: run supabase/migrations/0001_init.sql once
 pnpm db:seed                    # demo marketplace + demo account
 pnpm dev                        # http://localhost:3000  →  "Use the demo account"

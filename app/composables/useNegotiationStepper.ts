@@ -12,6 +12,7 @@ export function useNegotiationStepper(
   const error = ref<string | null>(null)
   let stopped = false
   let failures = 0
+  const pauseMs = Number(useRuntimeConfig().public.negotiationStepPauseMs) || 6000
 
   async function loop() {
     if (!import.meta.client || running.value) return
@@ -30,7 +31,7 @@ export function useNegotiationStepper(
           error.value = err?.data?.statusMessage ?? err?.message ?? 'Step failed'
         }
       }
-      await new Promise((resolve) => setTimeout(resolve, 1500))
+      await new Promise((resolve) => setTimeout(resolve, pauseMs))
     }
     running.value = false
   }

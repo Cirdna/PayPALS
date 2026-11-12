@@ -18,7 +18,8 @@
     "db:reset-demo": "tsx --tsconfig tsconfig.scripts.json --env-file=.env supabase/seed.ts --reset",
     "eval:negotiation": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/eval-negotiation.ts",
     "spike:paypal": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/paypal-spike.ts",
-    "spike:channel3": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/channel3-spike.ts"
+    "spike:channel3": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/channel3-spike.ts",
+    "probe:checkout-agent": "tsx --tsconfig tsconfig.scripts.json --env-file=.env scripts/probe-checkout-agent.ts"
   },
   "dependencies": {
     "@ai-sdk/google": "^4.0.117",

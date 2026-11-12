@@ -29,7 +29,7 @@ flowchart TB
   Server --> Lib --> DB
   DB -->|pg_cron every 15 min → POST /api/scan| S
   INT --> C3[Channel3] & PP[PayPal sandbox via Agent Toolkit] & TG[Telegram]
-  AI --> G[Gemini via AI SDK]
+  AI --> G[Groq LLMs via AI SDK]
 ```
 
 **Dependency rule (prevents import cycles):** `server/lib/integrations` may import `server/lib/ai`. `server/lib/ai`
@@ -253,7 +253,7 @@ Ownership check pattern for every `:id` route: load the row, join to `wishlist_i
 |---|---|
 | Vercel Hobby cron = once/day | pg_cron + pg_net (`supabase/cron.sql`) |
 | Function duration (60 s) | one negotiation round per request; scan ≤ 2 items / 45 s budget; UI scans one item per request |
-| Gemini free-tier rate limits | sequential LLM calls; batch matcher; LLM explanation only for medium/high risk; one auto-negotiation per item; pair-level cache; prod key with billing + spend cap |
+| Groq free-tier rate limits (~8k tokens/min per model) | sequential LLM calls; batch matcher; LLM explanation only for medium/high risk; one auto-negotiation per item; pair-level cache; short limits waited out once, else deterministic fallback + 60 s cooldown; browser stepper paced by `NUXT_PUBLIC_NEGOTIATION_STEP_PAUSE_MS`; paid Groq tier for judging |
 | Concurrent steppers (page + cron) | `claim_negotiation` lock; `claim_deal_notification` |
 | Toolkit only supports USD | whole app is USD |
 | Video may not show third-party trademarks | seeded marketplace uses fictional brands; `DEMO_MODE` hides images; the team decides whether to show the live Channel3 item in the video |

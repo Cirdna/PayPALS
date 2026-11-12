@@ -4,7 +4,7 @@ Everything here was checked against the **installed package versions** on 11 Nov
 recently and differ from older tutorials and from what a model remembers. **When this file and your memory
 disagree, this file wins.** If you find something here is wrong, fix this file in the same commit.
 
-Installed: nuxt 4.6 · vue 3.5 · vue-router 5 · @nuxt/ui 4.12 · @nuxtjs/supabase 2.1 · ai 7.0 · @ai-sdk/google 4.0 ·
+Installed: nuxt 4.6 · vue 3.5 · vue-router 5 · @nuxt/ui 4.12 · @nuxtjs/supabase 2.1 · ai 7.0 · @ai-sdk/groq 4.0 · @ai-sdk/google 4.0 ·
 zod **3.25** · @paypal/agent-toolkit 1.11 · @channel3/sdk 4.9 · ag-grid-community / ag-grid-vue3 36.3 · vitest 3 · pnpm 10.
 
 **Do not upgrade or add dependencies.** In particular keep `zod` on v3 (the PayPal toolkit's schemas are zod 3).
@@ -20,12 +20,12 @@ zod **3.25** · @paypal/agent-toolkit 1.11 · @channel3/sdk 4.9 · ag-grid-commu
 | `maxSteps: 5` | `stopWhen: stepCountIs(5)` |
 | `toolChoice: 'required'` with several steps | throws `ToolChoiceViolationError` on the step without a tool call → use `stopWhen: stepCountIs(1)` |
 | reading `result.toolResults[0].result` | read `result.steps.flatMap(s => s.content)`; parts have `type: 'tool-result'` (`.output`) or `type: 'tool-error'` (`.error`) |
-| hard-coded model id | `getModel('smart' \| 'fast')` from `server/lib/ai/model.ts` (ids from env; defaults `gemini-flash-latest` / `gemini-flash-lite-latest`) |
+| hard-coded model id | `getModel('smart' \| 'fast')` from `server/lib/ai/model.ts` (provider from `AI_PROVIDER`, default `groq`; ids from env, defaults `openai/gpt-oss-20b` (smart) / `openai/gpt-oss-120b` (fast); with `google`: `gemini-flash-latest` / `gemini-flash-lite-latest`) |
 | `MockLanguageModelV1/V2` in tests | `tests/helpers/mock-model.ts` (`mockJsonModel`, `mockToolCallModel`, `mockFailingModel`) + `setModelForTests()` |
 
 - Never call the LLM directly from a route. JSON → `generateStructured` (never throws; returns your `fallback` after 2 failed attempts).
 - Wrap all seller/listing text with `untrusted('seller_message', text)` before it goes into a prompt.
-- Gemini free tier is rate-limited per project: run LLM calls **sequentially** (no `Promise.all` over LLM calls).
+- Groq free tier is rate-limited (~8k tokens/min per model): run LLM calls **sequentially** (no `Promise.all` over LLM calls). `generateStructured` waits out a short advertised limit once, otherwise falls back and cools the model down for 60 s.
 
 ## 2. PayPal Agent Toolkit 1.11 (`@paypal/agent-toolkit/ai-sdk`)
 

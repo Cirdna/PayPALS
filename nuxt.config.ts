@@ -26,6 +26,8 @@ export default defineNuxtConfig({
     public: {
       appUrl: process.env.APP_URL || 'http://localhost:3000',
       demoMode: process.env.DEMO_MODE !== 'false',
+      /** Pause between negotiation rounds in the browser. Override at runtime with NUXT_PUBLIC_NEGOTIATION_STEP_PAUSE_MS. */
+      negotiationStepPauseMs: 6000,
       telegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || '',
       demoEmail: process.env.DEMO_EMAIL || '',
       demoPassword: process.env.DEMO_PASSWORD || '',
