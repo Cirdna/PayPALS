@@ -15,7 +15,7 @@ create table public.profiles (
   id                  uuid primary key references auth.users(id) on delete cascade,
   display_name        text,
   telegram_chat_id    bigint unique,
-  telegram_link_token text unique not null default encode(gen_random_bytes(12), 'hex'),
+  telegram_link_token text unique not null default encode(extensions.gen_random_bytes(12), 'hex'),
   created_at          timestamptz not null default now()
 );
 
