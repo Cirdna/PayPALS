@@ -46,10 +46,14 @@ export function setRawPayPalToolsForTests(tools: RawTools | null): void {
   raw = tools
 }
 
-/** Toolkit tools re-wrapped for AI SDK v7, every execute goes through `guard` first. Pass to generateText({ tools }). */
-export function guardedPayPalTools(guard: ToolGuard): ToolSet {
+/**
+ * Toolkit tools re-wrapped for AI SDK v7, every execute goes through `guard` first. Pass to generateText({ tools }).
+ * `names` limits what the model can even see (checkout exposes ONLY create_order).
+ */
+export function guardedPayPalTools(guard: ToolGuard, names?: readonly string[]): ToolSet {
   const out: ToolSet = {}
   for (const [name, t] of Object.entries(rawTools())) {
+    if (names && !names.includes(name)) continue
     out[name] = tool({
       description: t.description,
       inputSchema: t.parameters as never,
@@ -94,12 +98,19 @@ export function buildCreateOrderInput(o: { title: string; amount: number; return
 
 /**
  * Guard for a single checkout: create_order must be ONE item, quantity 1, no tax/shipping/discount, in USD,
- * for EXACTLY the agreed amount, and that amount must pass the mandate check. Everything else except
- * get_order / pay_order is blocked.
+ * for EXACTLY the agreed amount, that amount must pass the mandate check, and returnUrl / cancelUrl / item name /
+ * item description must equal the code-built `expectedInput` (the model may not redirect the buyer elsewhere).
+ * get_order / pay_order are blocked unless `allowCapture` (the model-facing path never sets it; the deterministic
+ * capture in checkout.ts uses its own no-op guard). Every other tool is blocked.
  */
-export function makeCheckoutGuard(opts: { expectedAmount: number; mandateCheck: (amount: number) => GuardrailResult }): ToolGuard {
+export function makeCheckoutGuard(opts: {
+  expectedAmount: number
+  mandateCheck: (amount: number) => GuardrailResult
+  expectedInput: CreateOrderInput
+  allowCapture?: boolean
+}): ToolGuard {
   return (toolName, input) => {
-    if (toolName === 'get_order' || toolName === 'pay_order') return
+    if ((toolName === 'get_order' || toolName === 'pay_order') && opts.allowCapture) return
     if (toolName !== 'create_order') {
       throw new PayPalGuardError({ allowed: false, violations: [{ code: 'amount_mismatch', detail: `Tool ${toolName} is not allowed during checkout` }] })
     }
@@ -111,6 +122,10 @@ export function makeCheckoutGuard(opts: { expectedAmount: number; mandateCheck: 
     if (i?.currencyCode !== APP_CURRENCY) violations.push({ code: 'currency_mismatch', detail: `Order currency must be ${APP_CURRENCY}` })
     if (!simple || !item || roundMoney(item.itemCost) !== amount) violations.push({ code: 'amount_mismatch', detail: 'Order must be exactly one item, quantity 1, without tax, shipping or discount' })
     if (amount !== roundMoney(opts.expectedAmount)) violations.push({ code: 'amount_mismatch', detail: `Order amount ${amount} does not equal the agreed price ${roundMoney(opts.expectedAmount)}` })
+    const want = opts.expectedInput
+    if (i?.returnUrl !== want.returnUrl || i?.cancelUrl !== want.cancelUrl || item?.name !== want.items[0]?.name || item?.description !== want.items[0]?.description) {
+      violations.push({ code: 'amount_mismatch', detail: 'Order return URL, cancel URL, item name and description must be exactly the ones built by the server' })
+    }
     if (Number.isFinite(amount)) violations.push(...opts.mandateCheck(amount).violations)
     if (violations.length > 0) throw new PayPalGuardError({ allowed: false, violations })
   }

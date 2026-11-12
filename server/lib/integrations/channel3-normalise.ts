@@ -2,6 +2,17 @@ import type { Channel3Api } from '@channel3/sdk'
 import type { ListingDraft } from '#shared/types'
 import { APP_CURRENCY, isValidPrice, roundMoney } from '#shared/utils/money'
 
+/** Channel3 data is untrusted: only http(s) URLs may reach the UI / Telegram links. */
+export function safeUrl(u: unknown): string | null {
+  if (typeof u !== 'string') return null
+  try {
+    const url = new URL(u)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Pure: one Channel3 product → one ListingDraft (cheapest in-stock USD offer), or null when it has none.
  * Verified against @channel3/sdk 4.9.0 types:
@@ -12,7 +23,7 @@ import { APP_CURRENCY, isValidPrice, roundMoney } from '#shared/utils/money'
  */
 export function normaliseProduct(p: Channel3Api.Product): ListingDraft | null {
   const offers = (p.offers ?? []).filter(
-    (o) => o.availability === 'InStock' && o.price?.currency === APP_CURRENCY && isValidPrice(o.price?.price),
+    (o) => o.availability === 'InStock' && o.price?.currency === APP_CURRENCY && isValidPrice(o.price?.price) && safeUrl(o.url) !== null,
   )
   if (offers.length === 0) return null
   const offer = offers.reduce((best, o) => (o.price.price < best.price.price ? o : best))
@@ -26,8 +37,8 @@ export function normaliseProduct(p: Channel3Api.Product): ListingDraft | null {
     price: roundMoney(offer.price.price),
     currency: APP_CURRENCY,
     condition: offer.condition === 'used' ? 'good' : 'new',
-    url: offer.url,
-    imageUrl: image?.url ?? null,
+    url: safeUrl(offer.url),
+    imageUrl: safeUrl(image?.url),
     retailer: offer.domain,
     negotiable: false,
   }
