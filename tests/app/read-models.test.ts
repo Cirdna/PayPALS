@@ -48,7 +48,7 @@ describe('resetUserData', () => {
     expect(fake.rows('wishlist_items').every((w) => w.status === 'active' && w.last_scanned_at === null)).toBe(true)
     expect(fake.rows('listings').length).toBeGreaterThan(0) // marketplace data is untouched
   })
-  it('removes the user's generated listings and their secrets, leaving other users' and seeded ones', async () => {
+  it('removes the user generated listings and their secrets, leaving other users and seeded ones', async () => {
     const base = seedTables()
     const gen = (id: string, ext: string) => ({ id, source: 'marketplace', external_id: ext, title: 't', price: 1 })
     const fake = createFakeDb({
