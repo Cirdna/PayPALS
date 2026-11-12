@@ -4,8 +4,19 @@ type ApiOptions = { method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; body?:
 // Plain signature: Nuxt's typed `$fetch` route inference is too deep for a generic wrapper.
 const rawFetch = $fetch as unknown as (url: string, opts?: unknown) => Promise<unknown>
 
+// Plain-language messages for the machine codes the checkout and negotiation routes send in `data.code`.
+const CODE_TEXT: Record<string, string> = {
+  checkout_in_progress: 'A payment for this deal is already in progress. Use "Continue to PayPal" or wait a moment.',
+  not_allowed: 'This deal cannot be paid right now: the wishlist item is paused or already fulfilled.',
+  not_payable: 'This is a retailer listing. Use "Buy at retailer" to purchase it.',
+  exceeds_mandate: 'The price is above your spending mandate, so the agent will not pay it.',
+  mandate_expired: 'Your spending mandate has expired. Add the item to your wishlist again to renew it.',
+}
+
 function errorText(e: unknown): string {
-  const err = e as { data?: { statusMessage?: string; message?: string }; statusMessage?: string; message?: string }
+  const err = e as { data?: { statusMessage?: string; message?: string; data?: { code?: string } }; statusMessage?: string; message?: string }
+  const code = err?.data?.data?.code
+  if (code && CODE_TEXT[code]) return CODE_TEXT[code]
   return err?.data?.statusMessage ?? err?.statusMessage ?? err?.data?.message ?? err?.message ?? 'Unknown error'
 }
 

@@ -121,6 +121,15 @@ describe('skipMatch', () => {
     expect(fake.rows('matches').find((m) => m.id === 'm-agreed')!.status).toBe('skipped')
   })
 
+  it('closes an active negotiation when the match is skipped, and leaves finished ones alone', async () => {
+    await fake.from('negotiations').insert({ id: 'n-active', match_id: 'm-agreed', status: 'active', round: 1, agreed_price: null })
+    await fake.from('negotiations').insert({ id: 'n-done', match_id: 'm-ready', status: 'agreed', round: 3, agreed_price: 280 })
+    expect(await skipMatch(DEMO_USER_ID, 'm-agreed')).toBe(true)
+    expect(await skipMatch(DEMO_USER_ID, 'm-ready')).toBe(true)
+    expect(fake.rows('negotiations').find((n) => n.id === 'n-active')!.status).toBe('no_deal')
+    expect(fake.rows('negotiations').find((n) => n.id === 'n-done')!.status).toBe('agreed')
+  })
+
   it('refuses flagged matches', async () => {
     expect(await skipMatch(DEMO_USER_ID, 'm-flag')).toBe(false)
     expect(fake.rows('matches').find((m) => m.id === 'm-flag')!.status).toBe('flagged')

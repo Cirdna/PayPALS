@@ -127,6 +127,8 @@ export async function skipMatch(userId: string, matchId: string): Promise<boolea
   if (!itemRow || toCamel<WishlistItem>(itemRow).userId !== userId) return false
   if (!SKIPPABLE.includes(match.status)) return false
   unwrap(await db().from('matches').update({ status: 'skipped' }).eq('id', matchId), 'skip match')
+  // Close an open negotiation so no `active` row is left dangling (the AI engine also stops stepping skipped matches).
+  unwrap(await db().from('negotiations').update({ status: 'no_deal' }).eq('match_id', matchId).eq('status', 'active'), 'close negotiation')
   return true
 }
 

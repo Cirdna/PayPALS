@@ -58,6 +58,8 @@ const listPrice = computed(() => listing.value?.price ?? 0)
 const saving = computed(() => Math.max(0, listPrice.value - bestPrice.value))
 const underLimit = computed(() => (item.value ? item.value.maxPrice - bestPrice.value : 0))
 const payable = computed(() => listing.value?.source === 'marketplace')
+// A paused or already-fulfilled wishlist item can no longer be paid for.
+const itemActive = computed(() => item.value?.status === 'active')
 const showImage = computed(() => !config.public.demoMode && !!listing.value?.imageUrl)
 
 const sellerLine = computed(() => {
@@ -307,6 +309,14 @@ useHead({ title: computed(() => (listing.value ? `${listing.value.title} · Deal
           :title="`Purchased for ${formatMoney(order?.amount ?? bestPrice)}`"
           description="Paid with PayPal. Nothing more to do."
         />
+        <UAlert
+          v-else-if="(state === 'agreed' || state === 'notified') && payable && !itemActive"
+          color="warning"
+          variant="subtle"
+          icon="i-lucide-pause-circle"
+          :title="item?.status === 'fulfilled' ? 'This wish is already fulfilled' : 'This wishlist item is paused'"
+          description="The agent will not pay for it. Reactivate the item to buy this deal."
+        />
         <p v-else-if="state === 'negotiating'" class="flex items-center gap-2 text-sm text-muted">
           <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin text-primary" />
           Your agent is negotiating. You will be asked to approve before any money moves.
@@ -331,7 +341,7 @@ useHead({ title: computed(() => (listing.value ? `${listing.value.title} · Deal
           </UButton>
 
           <UButton
-            v-if="(state === 'agreed' || state === 'notified') && payable"
+            v-if="(state === 'agreed' || state === 'notified') && payable && itemActive"
             size="lg"
             icon="i-lucide-wallet"
             class="flex-1 justify-center sm:flex-none"
@@ -359,6 +369,7 @@ useHead({ title: computed(() => (listing.value ? `${listing.value.title} · Deal
             class="flex-1 justify-center sm:flex-none"
             :to="listing.url ?? undefined"
             target="_blank"
+            rel="noopener noreferrer"
             :disabled="!listing.url"
           >
             Buy at retailer
