@@ -37,6 +37,7 @@ function toSeller(row: Record<string, unknown>): Seller {
 
 // ───────────────────────── deals ─────────────────────────
 
+/** The Deals board: every match except mismatches and purchases (those live in listPurchases). Newest-updated first. */
 export async function listDeals(userId: string, wishlistItemId?: string): Promise<DealRow[]> {
   let q = db().from('wishlist_items').select('*').eq('user_id', userId)
   if (wishlistItemId) q = q.eq('id', wishlistItemId)
@@ -44,9 +45,50 @@ export async function listDeals(userId: string, wishlistItemId?: string): Promis
   if (items.length === 0) return []
 
   const matches = toCamelList<Match>(unwrap(
-    await db().from('matches').select('*').in('wishlist_item_id', items.map((i) => i.id)).neq('status', 'mismatch').order('updated_at', { ascending: false }),
+    await db().from('matches').select('*').in('wishlist_item_id', items.map((i) => i.id))
+      .neq('status', 'mismatch').neq('status', 'purchased').order('updated_at', { ascending: false }),
     'load matches',
   ))
+  return toDealRows(items, matches)
+}
+
+/** A purchased deal and the completed PayPal order that paid for it. */
+export interface Purchase {
+  deal: DealRow
+  order: Order
+}
+
+/** Purchase history: purchased matches that have a completed PayPal order, newest payment first. */
+export async function listPurchases(userId: string): Promise<Purchase[]> {
+  const items = toCamelList<WishlistItem>(unwrap(await db().from('wishlist_items').select('*').eq('user_id', userId), 'load wishlist'))
+  if (items.length === 0) return []
+
+  const matches = toCamelList<Match>(unwrap(
+    await db().from('matches').select('*').in('wishlist_item_id', items.map((i) => i.id)).eq('status', 'purchased'),
+    'load purchased matches',
+  ))
+  if (matches.length === 0) return []
+
+  const orders = toCamelList<Order>(unwrap(
+    await db().from('orders').select('*').eq('user_id', userId).eq('status', 'completed')
+      .in('match_id', matches.map((m) => m.id)).order('updated_at', { ascending: false }),
+    'load completed orders',
+  ))
+  // Newest completed order per match (there should only be one).
+  const orderByMatch = new Map<string, Order>()
+  for (const o of orders) if (!orderByMatch.has(o.matchId)) orderByMatch.set(o.matchId, o)
+
+  const dealByMatch = new Map((await toDealRows(items, matches.filter((m) => orderByMatch.has(m.id)))).map((d) => [d.matchId, d]))
+  const out: Purchase[] = []
+  for (const [matchId, order] of orderByMatch) {
+    const deal = dealByMatch.get(matchId)
+    if (deal) out.push({ deal, order })
+  }
+  return out
+}
+
+/** Builds board rows for `matches` (keeps their order). Loads listings and public seller columns only. */
+async function toDealRows(items: WishlistItem[], matches: Match[]): Promise<DealRow[]> {
   if (matches.length === 0) return []
 
   const listings = toCamelList<Listing>(unwrap(

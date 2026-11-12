@@ -6,8 +6,6 @@ import { AgGridVue } from 'ag-grid-vue3'
 import {
   AllCommunityModule,
   ModuleRegistry,
-  colorSchemeDark,
-  themeQuartz,
   type CellClassParams,
   type ColDef,
   type GetRowIdParams,
@@ -23,17 +21,7 @@ import StatusChip from './StatusChip.vue'
 ModuleRegistry.registerModules([AllCommunityModule])
 
 // Follow the app's light/dark mode and use Nuxt UI's colours so the grid blends into the page.
-const colorMode = useColorMode()
-const theme = computed(() =>
-  (colorMode.value === 'dark' ? themeQuartz.withPart(colorSchemeDark) : themeQuartz).withParams({
-    backgroundColor: 'var(--ui-bg)',
-    foregroundColor: 'var(--ui-text)',
-    headerBackgroundColor: 'var(--ui-bg-muted)',
-    borderColor: 'var(--ui-border)',
-    accentColor: 'var(--ui-primary)',
-    fontFamily: 'inherit',
-  }),
-)
+const theme = useGridTheme()
 
 withDefaults(defineProps<{ rows: DealRow[]; quickFilterText?: string }>(), { quickFilterText: '' })
 const emit = defineEmits<{ open: [matchId: string] }>()

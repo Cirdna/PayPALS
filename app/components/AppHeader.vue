@@ -7,6 +7,7 @@ const route = useRoute()
 const links = [
   { label: 'Deals', to: '/deals', icon: 'i-lucide-tags' },
   { label: 'Wishlist', to: '/wishlist', icon: 'i-lucide-heart' },
+  { label: 'Purchases', to: '/purchases', icon: 'i-lucide-receipt' },
   { label: 'Settings', to: '/settings', icon: 'i-lucide-settings' },
 ]
 const isActive = (to: string) => route.path === to || route.path.startsWith(`${to}/`)
