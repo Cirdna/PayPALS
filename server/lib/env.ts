@@ -19,9 +19,12 @@ export const env = {
   /** New Supabase projects call it "secret key"; older ones "service_role key". Either works. */
   get supabaseServiceKey() { return process.env.SUPABASE_SECRET_KEY || req('SUPABASE_SERVICE_KEY') },
 
+  /** 'groq' (default) or 'google'. Only server/lib/ai/model.ts reads the provider keys. */
+  get aiProvider() { return opt('AI_PROVIDER', 'groq') },
+  get groqApiKey() { return req('GROQ_API_KEY') },
   get googleApiKey() { return req('GOOGLE_GENERATIVE_AI_API_KEY') },
-  get aiModelSmart() { return opt('AI_MODEL_SMART', 'gemini-flash-latest') },
-  get aiModelFast() { return opt('AI_MODEL_FAST', 'gemini-flash-lite-latest') },
+  get aiModelSmart() { return opt('AI_MODEL_SMART', this.aiProvider === 'google' ? 'gemini-flash-latest' : 'openai/gpt-oss-20b') },
+  get aiModelFast() { return opt('AI_MODEL_FAST', this.aiProvider === 'google' ? 'gemini-flash-lite-latest' : 'openai/gpt-oss-120b') },
 
   get paypalClientId() { return req('PAYPAL_CLIENT_ID') },
   get paypalClientSecret() { return req('PAYPAL_CLIENT_SECRET') },

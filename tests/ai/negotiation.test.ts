@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { NegotiationError } from '~~/server/lib/ai/errors'
 import { setModelForTests } from '~~/server/lib/ai/model'
-import { startNegotiation, stepNegotiation } from '~~/server/lib/ai/negotiation'
+import { fallbackBuyerMove, startNegotiation, stepNegotiation } from '~~/server/lib/ai/negotiation'
 import { setDbForTests } from '~~/server/lib/db'
 import { createFakeDb, type FakeDb } from '../helpers/fake-db'
 import { countingJsonModel, mockFailingModel } from '../helpers/mock-model'
@@ -182,6 +182,23 @@ describe('stepNegotiation', () => {
     expect(fake.rows('negotiations')[0]!.locked_until).toBeNull()
   })
 
+  it('with the model down the buyer still concedes toward its limit and reaches a deal inside the limits', async () => {
+    const n = await startNegotiation('m1')
+    setModelForTests('smart', mockFailingModel())
+    let r = await stepNegotiation(n.id)
+    for (let i = 0; i < 6 && !r.done; i++) r = await stepNegotiation(n.id)
+    expect(r.negotiation.status).toBe('agreed')
+    expect(r.negotiation.round).toBeLessThanOrEqual(6)
+    const price = r.negotiation.agreedPrice as number
+    expect(price).toBeGreaterThanOrEqual(255) // the hidden floor
+    expect(price).toBeLessThanOrEqual(279)    // never above the list price
+    const offers = fake.rows('negotiation_messages').filter((m) => m.role === 'buyer' && m.action === 'offer').map((m) => Number(m.price))
+    expect(offers.length).toBeGreaterThan(1)
+    expect([...offers].sort((a, b) => a - b)).toEqual(offers) // offers never go down
+    expect(Math.max(...offers)).toBeLessThanOrEqual(300)
+    expect(fake.rows('matches')[0]!.status).toBe('agreed')
+  })
+
   it('walks away when the mandate has expired', async () => {
     const n = await startNegotiation('m1')
     await fake.from('mandates').update({ expires_at: '2020-01-01T00:00:00Z' }).eq('id', 'md1')
@@ -193,5 +210,194 @@ describe('stepNegotiation', () => {
 
   it('unknown negotiation → NegotiationError', async () => {
     await expect(stepNegotiation('nope')).rejects.toMatchObject({ code: 'not_found' })
+  })
+})
+
+// ───────────────────────── review fixes ─────────────────────────
+
+/** Wraps a fake db so `fn` runs (and finishes) just before the nth query on `table` executes — to simulate another request interleaving. */
+function interleave(f: FakeDb, table: string, fn: () => Promise<unknown>, nth = 1) {
+  let seen = 0
+  return {
+    rpc: (name: string, args?: Record<string, any>) => f.rpc(name, args),
+    from: (t: string) => {
+      const q: any = f.from(t)
+      if (t === table && ++seen === nth) {
+        const orig = q.then.bind(q)
+        q.then = (ok: any, fail: any) => fn().then(() => orig(ok, fail))
+      }
+      return q
+    },
+  }
+}
+
+describe('message scrubbing through a round (M1, M2)', () => {
+  it('replaces an LLM buyer message that leaks the ceiling; action and price stay', async () => {
+    const n = await startNegotiation('m1')
+    useModel([buyer('offer', 250, 'I can go up to $300 if you move a bit.'), seller('counter', 270, 'ok')])
+    const r = await stepNegotiation(n.id)
+    expect(r.newMessages[0]).toMatchObject({ role: 'buyer', action: 'offer', price: 250, message: 'My offer is $250.00.' })
+    expect(JSON.stringify(fake.rows('negotiation_messages'))).not.toContain('300')
+  })
+  it('replaces an LLM seller message that names the floor', async () => {
+    const n = await startNegotiation('m1')
+    useModel([buyer('offer', 250, 'How about 250?'), seller('counter', 270, 'Honestly my floor is $255 but I can do 270.')])
+    const r = await stepNegotiation(n.id)
+    expect(r.newMessages[1]).toMatchObject({ role: 'seller', action: 'counter', price: 270, message: 'I can do $270.00.' })
+    expect(JSON.stringify(fake.rows('negotiation_messages'))).not.toContain('255')
+  })
+  it('keeps harmless LLM messages untouched', async () => {
+    const n = await startNegotiation('m1')
+    useModel([buyer('offer', 250, 'It is used, so $250 feels right.'), seller('counter', 270, 'You offered $250; $270 is fair.')])
+    const r = await stepNegotiation(n.id)
+    expect(r.newMessages.map((m) => m.message)).toEqual(['It is used, so $250 feels right.', 'You offered $250; $270 is fair.'])
+  })
+})
+
+describe('locking (M3)', () => {
+  it('two sequential steps each claim and release the lock', async () => {
+    const n = await startNegotiation('m1')
+    useModel([buyer('offer', 250), seller('counter', 272), buyer('offer', 255), seller('counter', 268)])
+    const r1 = await stepNegotiation(n.id)
+    expect(fake.rows('negotiations')[0]!.locked_until).toBeNull()
+    const r2 = await stepNegotiation(n.id)
+    expect([r1.negotiation.round, r2.negotiation.round]).toEqual([1, 2])
+    expect(fake.rows('negotiations')[0]!.locked_until).toBeNull()
+    expect(fake.calls.filter((c) => c.table === 'rpc:claim_negotiation')).toHaveLength(2)
+  })
+
+  it('releases the lock when the round throws', async () => {
+    const n = await startNegotiation('m1')
+    await fake.from('mandates').delete().eq('id', 'md1') // runRound cannot load the mandate → throws
+    useModel([buyer('offer', 250)])
+    await expect(stepNegotiation(n.id)).rejects.toThrow(/load mandate/)
+    expect(fake.rows('negotiations')[0]!.locked_until).toBeNull()
+    expect(fake.rows('negotiations')[0]!.status).toBe('active')
+  })
+
+  it('a slow stepper whose lock expired does not free the lock of the stepper that reclaimed it', async () => {
+    const n = await startNegotiation('m1')
+    useModel([buyer('offer', 250), seller('counter', 270)])
+    let reclaimed = ''
+    setDbForTests(interleave(fake, 'mandates', async () => {
+      fake.advance(46_000) // A's 45 s lock has expired
+      const res = await fake.rpc('claim_negotiation', { p_id: n.id, p_lock_seconds: 45 }) // B reclaims it
+      reclaimed = res.data![0]!.locked_until
+    }))
+    await stepNegotiation(n.id) // A finishes its round afterwards
+    expect(reclaimed).not.toBe('')
+    expect(fake.rows('negotiations')[0]!.locked_until).toBe(reclaimed)
+  })
+
+  it('a late finisher cannot overwrite a negotiation that another stepper already finished', async () => {
+    const n = await startNegotiation('m1')
+    useModel([buyer('offer', 285)]) // would agree at 279
+    setDbForTests(interleave(fake, 'mandates', async () => {
+      await fake.from('negotiations').update({ status: 'agreed', agreed_price: 270, round: 3 }).eq('id', n.id)
+      await fake.from('matches').update({ status: 'agreed', best_price: 270 }).eq('id', 'm1')
+    }))
+    const r = await stepNegotiation(n.id)
+    expect(r).toMatchObject({ done: true, newMessages: [], negotiation: { status: 'agreed', agreedPrice: 270 } })
+    expect(fake.rows('negotiations')[0]).toMatchObject({ status: 'agreed', agreed_price: 270, round: 3 })
+    expect(fake.rows('matches')[0]).toMatchObject({ status: 'agreed', best_price: 270 })
+    expect(fake.rows('agent_events').map((e) => e.type)).not.toContain('deal_agreed')
+  })
+
+  it('a late no_deal cannot overwrite a match that already moved on', async () => {
+    const n = await startNegotiation('m1')
+    useModel([buyer('walk_away', null, 'Too far apart.')])
+    setDbForTests(interleave(fake, 'mandates', async () => {
+      await fake.from('matches').update({ status: 'purchased' }).eq('id', 'm1')
+    }))
+    await stepNegotiation(n.id)
+    expect(fake.rows('matches')[0]!.status).toBe('purchased')
+    expect(fake.rows('agent_events').map((e) => e.type)).not.toContain('no_deal')
+  })
+})
+
+describe('skipped / paused (M4)', () => {
+  it('a match the user skipped ends the negotiation without an LLM call or messages', async () => {
+    const n = await startNegotiation('m1')
+    await fake.from('matches').update({ status: 'skipped' }).eq('id', 'm1')
+    const model = useModel([buyer('offer', 250)])
+    const r = await stepNegotiation(n.id)
+    expect(r).toMatchObject({ done: true, busy: false, newMessages: [], negotiation: { status: 'no_deal' } })
+    expect(model.calls()).toBe(0)
+    expect(fake.rows('matches')[0]!.status).toBe('skipped')
+    expect(fake.rows('negotiation_messages')).toHaveLength(1)
+    expect(fake.rows('agent_events').map((e) => e.type)).toEqual(['negotiation_started'])
+    expect(fake.rows('negotiations')[0]!.locked_until).toBeNull()
+  })
+  it('a paused wishlist item ends the negotiation the same way', async () => {
+    const n = await startNegotiation('m1')
+    await fake.from('wishlist_items').update({ status: 'paused' }).eq('id', 'w1')
+    const model = useModel([buyer('offer', 250)])
+    const r = await stepNegotiation(n.id)
+    expect(r).toMatchObject({ done: true, newMessages: [], negotiation: { status: 'no_deal' } })
+    expect(model.calls()).toBe(0)
+    expect(fake.rows('negotiation_messages')).toHaveLength(1)
+  })
+  it('startNegotiation does not overwrite a match that was skipped while it was starting', async () => {
+    setDbForTests(interleave(fake, 'listing_secrets', async () => { await fake.from('matches').update({ status: 'skipped' }).eq('id', 'm1') }))
+    await expect(startNegotiation('m1')).rejects.toMatchObject({ code: 'not_ready' })
+    expect(fake.rows('matches')[0]!.status).toBe('skipped')
+    expect(fake.rows('negotiations')).toHaveLength(0)
+    expect(fake.rows('negotiation_messages')).toHaveLength(0)
+  })
+})
+
+describe('fatal guardrail paths and events', () => {
+  it('walks away when the mandate was revoked', async () => {
+    const n = await startNegotiation('m1')
+    await fake.from('mandates').update({ revoked_at: '2026-11-11T00:00:00Z' }).eq('id', 'md1')
+    useModel([buyer('offer', 250)])
+    const r = await stepNegotiation(n.id)
+    expect(r.newMessages.map((m) => [m.role, m.action])).toEqual([['guardrail', 'blocked'], ['buyer', 'walk_away']])
+    expect(r.newMessages[0]!.guardrail!.violations.map((v) => v.code)).toContain('mandate_revoked')
+    expect(r.negotiation.status).toBe('no_deal')
+  })
+  it('walks away on a currency mismatch', async () => {
+    const n = await startNegotiation('m1')
+    await fake.from('listings').update({ currency: 'SGD' }).eq('id', 'l1')
+    useModel([buyer('offer', 250)])
+    const r = await stepNegotiation(n.id)
+    expect(r.newMessages[0]!.guardrail!.violations.map((v) => v.code)).toContain('currency_mismatch')
+    expect(r.newMessages.map((m) => [m.role, m.action])).toEqual([['guardrail', 'blocked'], ['buyer', 'walk_away']])
+    expect(r.negotiation.status).toBe('no_deal')
+  })
+  it('logs negotiation_started, negotiation_round and no_deal', async () => {
+    const n = await startNegotiation('m1')
+    useModel([buyer('offer', 250), seller('counter', 272), buyer('walk_away', null, 'Too far apart.')])
+    await stepNegotiation(n.id)
+    expect(fake.rows('agent_events').map((e) => e.type)).toEqual(['negotiation_started', 'negotiation_round'])
+    expect(fake.rows('agent_events')[1]).toMatchObject({ match_id: 'm1', user_id: 'u1', payload: { round: 1, buyerOffer: 250, sellerPrice: 272 } })
+    await stepNegotiation(n.id)
+    expect(fake.rows('agent_events').map((e) => e.type)).toEqual(['negotiation_started', 'negotiation_round', 'no_deal'])
+  })
+})
+
+describe('fallbackBuyerMove (model unavailable)', () => {
+  const base = { opening: 250, limit: 300, round: 2, maxRounds: 6 }
+  it('round 1 (no previous offer) opens at the opening offer', () => {
+    expect(fallbackBuyerMove({ ...base, round: 1, lastOffer: null, sellerLastPrice: 279 })).toMatchObject({ action: 'offer', price: 250 })
+  })
+  it('raises by a third of the gap, at least $2', () => {
+    expect(fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 274 })).toMatchObject({ action: 'offer', price: 258 })
+    expect(fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 262 })).toMatchObject({ action: 'offer', price: 254 })
+  })
+  it('never offers above the limit and never accepts a price above it', () => {
+    const m = fallbackBuyerMove({ ...base, lastOffer: 295, sellerLastPrice: 340, round: 6 })
+    expect(m).toMatchObject({ action: 'offer', price: 300 })
+    expect(fallbackBuyerMove({ ...base, lastOffer: 300, sellerLastPrice: 340, round: 6 })).toMatchObject({ action: 'offer', price: 300 })
+  })
+  it('accepts the seller price when it is within the limit and close, or in the final round', () => {
+    expect(fallbackBuyerMove({ ...base, lastOffer: 262, sellerLastPrice: 264 })).toMatchObject({ action: 'accept', price: null })
+    expect(fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 290, round: 6 })).toMatchObject({ action: 'accept' })
+    expect(fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 290, round: 3 })).toMatchObject({ action: 'offer' })
+  })
+  it('never mentions the limit in the message', () => {
+    const m = fallbackBuyerMove({ ...base, lastOffer: 250, sellerLastPrice: 340 })
+    expect(m).toMatchObject({ action: 'offer', price: 280 })
+    expect(m.message).not.toMatch(/300/)
   })
 })

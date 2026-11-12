@@ -8,7 +8,7 @@ import { db, unwrap } from '../db'
 import { logEvent } from '../events'
 import { toCamel, toCamelList } from '../mappers'
 import { NegotiationError } from './errors'
-import { checkBuyerDecision, detectInjection, enforceSellerFloor } from './guardrail'
+import { checkBuyerDecision, detectInjection, enforceSellerFloor, sanitizeBuyerMessage } from './guardrail'
 import { buyerPrompt, sellerPrompt } from './prompts/negotiation'
 import { generateStructured } from './structured'
 
@@ -37,6 +37,24 @@ export function openingOffer(item: WishlistItem, listing: Listing, limit: number
   return roundMoney(Math.min(limit, item.targetPrice ?? listing.price * 0.8))
 }
 
+/**
+ * Buyer move used when the model is unavailable (outage, quota, invalid output). Deterministic and conservative:
+ * round 1 opens at the opening offer; later rounds raise by a third of the gap (at least $2) and never above the limit;
+ * the seller's price is accepted only when it is within the limit and either close (within max($5, 3 %)) or in the final round.
+ * The guardrail still checks whatever this returns. The message never states the limit.
+ */
+export function fallbackBuyerMove(p: { opening: number; lastOffer: number | null; sellerLastPrice: number; limit: number; round: number; maxRounds: number }): BuyerDecision {
+  const { opening, lastOffer, sellerLastPrice, limit, round, maxRounds } = p
+  if (lastOffer === null) return { action: 'offer', price: opening, message: `My offer is ${formatMoney(opening)}.` }
+  const close = sellerLastPrice - lastOffer <= Math.max(5, sellerLastPrice * 0.03)
+  if (sellerLastPrice <= limit && (close || round >= maxRounds)) {
+    return { action: 'accept', price: null, message: `That works for me, I'll take it at ${formatMoney(sellerLastPrice)}.` }
+  }
+  const raised = roundMoney(Math.min(limit, lastOffer + Math.max(2, (sellerLastPrice - lastOffer) / 3)))
+  const price = Math.max(lastOffer, raised)
+  return { action: 'offer', price, message: `My offer is ${formatMoney(price)}.` }
+}
+
 export async function startNegotiation(matchId: string): Promise<Negotiation> {
   const match = unwrap(await db().from('matches').select('*').eq('id', matchId).maybeSingle(), 'load match') as Row | null
   if (!match) throw new NegotiationError('not_found', `Match ${matchId} not found`)
@@ -58,7 +76,12 @@ export async function startNegotiation(matchId: string): Promise<Negotiation> {
   }
   const negotiation = created.data as Row
 
-  unwrap(await db().from('matches').update({ status: 'negotiating' }).eq('id', matchId), 'update match')
+  // Conditional: a match the user skipped in the meantime must not be overwritten.
+  const claimedMatch = unwrap(await db().from('matches').update({ status: 'negotiating' }).eq('id', matchId).eq('status', 'ready').select(), 'update match') as Row[]
+  if (claimedMatch.length === 0) {
+    unwrap(await db().from('negotiations').delete().eq('id', negotiation.id), 'remove negotiation')
+    throw new NegotiationError('not_ready', 'Match is no longer ready; it cannot be negotiated')
+  }
   const opener = (secret?.scripted_messages as Record<string, string> | undefined)?.['0']
     ?? `Hi! Yes, it's still available. I'm asking ${formatMoney(listing.price)}.`
   unwrap(await db().from('negotiation_messages').insert({
@@ -77,18 +100,31 @@ export async function stepNegotiation(negotiationId: string): Promise<Negotiatio
     const now = await loadNegotiationRow(negotiationId)
     return { negotiation: toNegotiation(now), newMessages: [], done: now.status !== 'active', busy: now.status === 'active' }
   }
+  const mine = claimed[0]!
   try {
-    return await runRound(claimed[0]!)
+    return await runRound(mine)
   } finally {
-    await db().from('negotiations').update({ locked_until: null }).eq('id', negotiationId)
+    // Release only OUR lock: if it expired and another stepper reclaimed it, locked_until is theirs now and stays.
+    try {
+      await db().from('negotiations').update({ locked_until: null }).eq('id', negotiationId).eq('locked_until', mine.locked_until)
+    } catch (err) {
+      console.warn('[negotiation] could not release the lock (it expires on its own):', err instanceof Error ? err.message : 'unknown error')
+    }
   }
 }
 
 async function runRound(neg: Row): Promise<NegotiationStepResponse> {
   // ── load everything this round needs (simple queries, one table each) ──
   const match = unwrap(await db().from('matches').select('*').eq('id', neg.match_id).single(), 'load match') as Row
-  const listing = toCamel<Listing>(unwrap(await db().from('listings').select('*').eq('id', match.listing_id).single(), 'load listing') as Row)
   const item = toCamel<WishlistItem>(unwrap(await db().from('wishlist_items').select('*').eq('id', match.wishlist_item_id).single(), 'load wishlist item') as Row)
+
+  // The user skipped the match or paused the wishlist item since the last round: stop quietly (no LLM call, no messages).
+  if (match.status !== 'negotiating' || item.status !== 'active') {
+    const closed = unwrap(await db().from('negotiations').update({ status: 'no_deal' }).eq('id', neg.id).eq('status', 'active').select(), 'close negotiation') as Row[]
+    return { negotiation: toNegotiation(closed[0] ?? await loadNegotiationRow(neg.id)), newMessages: [], done: true, busy: false }
+  }
+
+  const listing = toCamel<Listing>(unwrap(await db().from('listings').select('*').eq('id', match.listing_id).single(), 'load listing') as Row)
   const mandate = toCamel<Mandate>(unwrap(await db().from('mandates').select('*').eq('wishlist_item_id', item.id).single(), 'load mandate') as Row)
   const secret = unwrap(await db().from('listing_secrets').select('*').eq('listing_id', listing.id).maybeSingle(), 'load listing secret') as Row | null
   const personaRow = listing.sellerId
@@ -115,16 +151,18 @@ async function runRound(neg: Row): Promise<NegotiationStepResponse> {
     newMessages.push(msg)
     history.push(msg)
   }
+  // Every write that ends the negotiation is conditional: a late finisher must not overwrite one that already finished.
   const finish = async (status: 'agreed' | 'no_deal', price: number | null): Promise<NegotiationStepResponse> => {
-    const row = unwrap(await db().from('negotiations').update({ status, round: n, agreed_price: price }).eq('id', neg.id).select().single(), 'finish negotiation') as Row
+    const rows = unwrap(await db().from('negotiations').update({ status, round: n, agreed_price: price }).eq('id', neg.id).eq('status', 'active').select(), 'finish negotiation') as Row[]
+    if (rows.length === 0) return { negotiation: toNegotiation(await loadNegotiationRow(neg.id)), newMessages: [], done: true, busy: false }
     if (status === 'agreed') {
-      unwrap(await db().from('matches').update({ status: 'agreed', best_price: price }).eq('id', match.id), 'update match')
-      await logEvent({ userId: item.userId, matchId: match.id, type: 'deal_agreed', message: `Agreed ${formatMoney(price!)} for "${listing.title}" (listed ${formatMoney(listing.price)})`, payload: { price, listPrice: listing.price } })
+      const updated = unwrap(await db().from('matches').update({ status: 'agreed', best_price: price }).eq('id', match.id).eq('status', 'negotiating').select(), 'update match') as Row[]
+      if (updated.length > 0) await logEvent({ userId: item.userId, matchId: match.id, type: 'deal_agreed', message: `Agreed ${formatMoney(price!)} for "${listing.title}" (listed ${formatMoney(listing.price)})`, payload: { price, listPrice: listing.price } })
     } else {
-      unwrap(await db().from('matches').update({ status: 'no_deal' }).eq('id', match.id), 'update match')
-      await logEvent({ userId: item.userId, matchId: match.id, type: 'no_deal', message: `No deal on "${listing.title}"` })
+      const updated = unwrap(await db().from('matches').update({ status: 'no_deal' }).eq('id', match.id).eq('status', 'negotiating').select(), 'update match') as Row[]
+      if (updated.length > 0) await logEvent({ userId: item.userId, matchId: match.id, type: 'no_deal', message: `No deal on "${listing.title}"` })
     }
-    return { negotiation: toNegotiation(row), newMessages, done: true, busy: false }
+    return { negotiation: toNegotiation(rows[0]!), newMessages, done: true, busy: false }
   }
 
   // ── 1. did the seller's last message try to instruct the agent? (logged, never obeyed) ──
@@ -146,7 +184,7 @@ async function runRound(neg: Row): Promise<NegotiationStepResponse> {
   })
   const proposed = await generateStructured({
     kind: 'smart', schema: buyerSchema, system: bp.system, prompt: bp.prompt,
-    fallback: { action: 'offer', price: fallbackPrice, message: `My offer is ${formatMoney(fallbackPrice)}.` },
+    fallback: fallbackBuyerMove({ opening, lastOffer, sellerLastPrice, limit, round: n, maxRounds }),
   })
   let decision: BuyerDecision = { ...proposed.value, price: isValidPrice(proposed.value.price) ? roundMoney(proposed.value.price) : proposed.value.price }
   const check = (d: BuyerDecision) => checkBuyerDecision({ decision: d, mandate, item, listingCurrency: listing.currency, previousBuyerOffers, sellerLastPrice, round: n, maxRounds })
@@ -160,6 +198,9 @@ async function runRound(neg: Row): Promise<NegotiationStepResponse> {
     const fatal = verdict.violations.some((v) => FATAL.has(v.code))
     decision = !fatal && check(restated).allowed ? restated : { action: 'walk_away', price: null, message: "I can't go further on this one. Thanks for your time." }
   }
+
+  // The buyer's words may not reveal the private ceiling, whatever the model wrote (numbers were validated above).
+  decision = sanitizeBuyerMessage(decision, { sellerLastPrice, previousBuyerOffers })
 
   if (decision.action === 'walk_away') {
     await say('buyer', 'walk_away', null, decision.message)
@@ -192,7 +233,9 @@ async function runRound(neg: Row): Promise<NegotiationStepResponse> {
 
   // ── 4. round bookkeeping ──
   if (n >= maxRounds) return finish('no_deal', null)
-  const row = unwrap(await db().from('negotiations').update({ round: n }).eq('id', neg.id).select().single(), 'update round') as Row
+  const rows = unwrap(await db().from('negotiations').update({ round: n }).eq('id', neg.id).eq('status', 'active').select(), 'update round') as Row[]
+  if (rows.length === 0) return { negotiation: toNegotiation(await loadNegotiationRow(neg.id)), newMessages: [], done: true, busy: false }
+  const row = rows[0]!
   await logEvent({ userId: item.userId, matchId: match.id, type: 'negotiation_round', message: `Round ${n}: offered ${formatMoney(buyerOffer)}, seller at ${formatMoney(seller.price ?? sellerLastPrice)}`, payload: { round: n, buyerOffer, sellerPrice: seller.price } })
   return { negotiation: toNegotiation(row), newMessages, done: false, busy: false }
 }

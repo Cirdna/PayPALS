@@ -67,7 +67,7 @@ export function scoreRisk(i: RiskInput, duplicateFound: boolean): RiskScore {
 
 /** Deterministic explanation: used for low risk and as the fallback when the LLM explanation fails. */
 export function templateExplanation(r: RiskScore): string {
-  if (r.signals.length === 0) return 'No risk signals found.'
+  if (r.signals.length === 0) return 'No significant risk signals.'
   const lead = r.level === 'high' ? 'High risk' : r.level === 'medium' ? 'Some risk' : 'Low risk'
   return `${lead}: ${r.signals.map((s) => s.detail.charAt(0).toLowerCase() + s.detail.slice(1)).join('; ')}.`
 }

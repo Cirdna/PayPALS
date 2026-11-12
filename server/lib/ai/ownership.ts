@@ -15,3 +15,7 @@ export async function ownerOfNegotiation(negotiationId: string): Promise<string 
   const neg = unwrap(await db().from('negotiations').select('id, match_id').eq('id', negotiationId).maybeSingle(), 'load negotiation') as Row | null
   return neg ? ownerOfMatch(neg.match_id) : null
 }
+
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+/** Route ids must look like a UUID before they reach the database; anything else gets the same 404 as an unknown id. */
+export const isUuid = (id: string): boolean => UUID_SHAPE.test(id)
