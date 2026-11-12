@@ -102,8 +102,8 @@ if the result is `agreed`, call `integrations.notifyDeal(matchId)`.
 2. Load messages, match, listing, `listing_secrets`, wishlist item, mandate. `n = round + 1`.
 3. **Injection check (code):** `detectInjection(lastSellerMessage)` → on hit insert a `guardrail` message (action `flagged`, violation `injection_detected`, detail = matched pattern) + event `injection_detected`. Not fatal.
 4. **Buyer move:** `generateStructured` (smart model) → `BuyerDecision`. Seller text is wrapped with `untrusted()`. The prompt never contains `limit` as "you may go up to" — it gets `targetPrice` and a private `walkAwayAbove = limit`.
-   Fallback when the LLM fails: re-offer the previous buyer offer (or `targetPrice` / 80 % of list price in round 1).
-5. **Guardrail (code):** `checkBuyerDecision(...)` (table below). If not allowed: insert a `guardrail` message (action `blocked`, violations), event `guardrail_blocked`, and **replace** the decision with: previous valid buyer offer re-stated (`"That's above what I can do. My offer stands at $X."`), or `walk_away` if there is none or the violation is `mandate_expired` / `mandate_revoked`.
+   Fallback when the LLM fails: concede deterministically (opening offer in round 1, then +1/3 of the gap, at least $2, never above the limit; accept the seller price if within the limit and close or in the final round).
+5. **Guardrail (code):** `checkBuyerDecision(...)` (table below). If not allowed: insert a `guardrail` message (action `blocked`, violations), event `guardrail_blocked`, and **replace** the decision with: previous valid buyer offer re-stated (`"That's above what I can do. My offer stands at $X."`; in round 1 the opening offer is re-stated), or `walk_away` when the violation is `mandate_expired` / `mandate_revoked`.
 6. Insert the buyer message. Then:
    - `walk_away` → status `no_deal`.
    - `accept` (price = seller's last price, already validated ≤ limit) → **agreed** at that price.
