@@ -1,6 +1,6 @@
 # Workstream A (AI engine) — status for the other teams
 
-_Updated: 2026-11-12 08:40 SGT_
+_Updated: 2026-11-12 10:20 SGT_
 
 Only workstream A edits this file. Keep it short (under 40 lines), no secrets, no keys.
 Post it with `scripts/team-sync.sh push`.
@@ -13,6 +13,8 @@ Post it with `scripts/team-sync.sh push`.
 
 - INTEGRATION CHECK (scratch merge of ws-a-ai + ws-b-pay + ws-c-app on a clean main, local Supabase): no merge conflicts; `pnpm test` 334 passed (1 skipped); typecheck, scripts tsc clean; C's `pnpm db:seed` works and is idempotent (11 sellers, 21 listings, 3 items); A's mock eval 8/8 on C's seed data (matcher 0 disagreements of 21).
 - Over real HTTP with a real login: /api/me, wishlist, deals, deal detail, events, skip, demo reset all work; B's scan + A's matcher/risk/negotiation write rows that C's deals board reads (17 visible of 21 matches, mismatch hidden); no floor/persona/scripted text in any response; every other-user id gives the same 404; the injection line from retro_ray is flagged; checkout refuses ready/over_budget/flagged and a $310 match against the $300 mandate; PayPal failure gives a clean 502, match stays `agreed`, no order. Nothing needed from B or C.
+
+- Real Gemini (free-tier key) run: matcher 21/21 correct; negotiation quality good where the model ran. Free-tier quota is the blocker (flash-latest daily limit hit; flash-lite per-minute limit hit by eval bursts). A now fails over on a 429 with a 60 s cooldown instead of retrying. A4 (3 clean eval runs) needs billing on the Google AI Studio project.
 
 ## In progress
 

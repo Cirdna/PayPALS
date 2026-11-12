@@ -3,13 +3,13 @@ import { MockLanguageModelV4 } from 'ai/test'
 import type { LanguageModel } from 'ai'
 import { z } from 'zod'
 import { setModelForTests } from '~~/server/lib/ai/model'
-import { generateStructured, untrusted } from '~~/server/lib/ai/structured'
+import { generateStructured, resetCooldownsForTests, untrusted } from '~~/server/lib/ai/structured'
 import { mockFailingModel, mockJsonModel } from '../helpers/mock-model'
 
 const schema = z.object({ action: z.enum(['offer', 'accept', 'walk_away']), price: z.number().nullable(), message: z.string() })
 const fallback = { action: 'walk_away' as const, price: null, message: 'fallback' }
 
-afterEach(() => setModelForTests('smart', null))
+afterEach(() => { setModelForTests('smart', null); setModelForTests('fast', null); resetCooldownsForTests(); vi.useRealTimers() })
 
 describe('generateStructured', () => {
   it('returns the parsed object', async () => {
@@ -66,5 +66,45 @@ describe('generateStructured timeout', () => {
     } finally {
       timeout.mockRestore()
     }
+  })
+})
+
+describe('rate limits (429 / quota)', () => {
+  const quotaModel = () => {
+    let calls = 0
+    const err = Object.assign(new Error('You exceeded your current quota, please check your plan and billing details.'), { statusCode: 429 })
+    const model = new MockLanguageModelV4({ doGenerate: async () => { calls++; throw err } } as never) as unknown as LanguageModel
+    return { model, calls: () => calls }
+  }
+  it('does not retry a 429 and returns the fallback straight away', async () => {
+    const q = quotaModel(); setModelForTests('smart', q.model)
+    const r = await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    expect(r).toMatchObject({ usedFallback: true, value: fallback })
+    expect(q.calls()).toBe(1)
+  })
+  it('skips that model for 60 s after a 429, then tries again', async () => {
+    vi.useFakeTimers()
+    const q = quotaModel(); setModelForTests('smart', q.model)
+    await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    const r2 = await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    expect(r2.usedFallback).toBe(true)
+    expect(q.calls()).toBe(1) // cooldown: the model was not called again
+    vi.advanceTimersByTime(61_000)
+    await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    expect(q.calls()).toBe(2)
+  })
+  it('the cooldown is per model kind', async () => {
+    const q = quotaModel(); setModelForTests('smart', q.model)
+    await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    setModelForTests('fast', mockJsonModel([{ action: 'offer', price: 300, message: 'hi' }]))
+    const r = await generateStructured({ kind: 'fast', schema, system: 's', prompt: 'p', fallback })
+    expect(r.usedFallback).toBe(false)
+  })
+  it('other failures are still retried once and do not start a cooldown', async () => {
+    setModelForTests('smart', mockFailingModel())
+    await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    setModelForTests('smart', mockJsonModel([{ action: 'offer', price: 300, message: 'hi' }]))
+    const r = await generateStructured({ kind: 'smart', schema, system: 's', prompt: 'p', fallback })
+    expect(r.usedFallback).toBe(false)
   })
 })
