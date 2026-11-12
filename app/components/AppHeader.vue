@@ -19,7 +19,7 @@ async function signOut() {
 
 <template>
   <header class="sticky top-0 z-20 border-b border-default bg-default/80 backdrop-blur">
-    <UContainer class="flex h-14 items-center gap-2 sm:gap-4">
+    <UContainer class="flex h-14 max-w-[1600px] items-center gap-2 sm:gap-4">
       <NuxtLink to="/" class="flex shrink-0 items-center gap-2 font-semibold tracking-tight text-highlighted">
         <span class="flex size-7 items-center justify-center rounded-lg bg-primary/15 text-base">🐕</span>
         <span>DealHound</span>
