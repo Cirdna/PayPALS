@@ -3,7 +3,7 @@
 ## 0. How this is organised
 - **3 workstreams → 3 humans → 3 agent teams**, each on its own laptop and branch: A `ws-a-ai`, B `ws-b-pay`, C `ws-c-app`.
 - **Models: the lead (orchestrator) runs on Opus; every teammate (coder) runs on Sonnet.** The lead plans, assigns tasks and reviews; the teammates implement. Teammates share a task list and can message each other.
-- **There is no messaging between the three teams.** Coordination across workstreams = the contract files (`shared/types`, the migration, `seed/data.json`), the stub entry points (`ai`, `integrations`), `docs/progress/*.md`, your group chat, and the three checkpoint merges.
+- **The three teams cannot message each other live.** They share status through git instead — see "Team sync" below. Coordination across workstreams = the outbox files in `docs/sync/`, the contract files (`shared/types`, the migration, `seed/data.json`), the stub entry points (`ai`, `integrations`), `docs/progress/*.md`, your group chat, and the three checkpoint merges.
 - Facts about agent teams that shape the rules below (from the Claude Code docs):
   - teammates load `CLAUDE.md`, skills and project settings themselves, but **not the lead's conversation** — everything they need must be in the spawn prompt or the repo;
   - two teammates editing the same file overwrite each other → every teammate gets its own file list;
@@ -26,13 +26,20 @@ because the setting has not always been honoured). Run the `git config` line onc
 automatically. Before each push, `git log --format=%B origin/main..HEAD | grep -i "co-authored-by\|claude"` should print nothing.
 What the committed `.claude/settings.json` already does: turns agent teams on, enables Superpowers, sets edit mode to
 auto-accept, pre-approves `pnpm test / typecheck / build / dev`, the seed/eval/spike scripts and `git add <files>` /
-`git commit` / `git push`, and **blocks** force-push, `git add -A`, `git reset --hard`, installing packages, reading `.env`,
-and the interactive Superpowers brainstorming skill. Agents may push their own branch; the human lead merges.
+all `git` and `gh` commands, and **blocks** `git add -A` / `git add .` (stage named files only), installing packages,
+reading `.env`, and the interactive Superpowers brainstorming skill. The only GitHub rules: no "Claude" in anything sent to GitHub, and never Claude as a co-author.
 
 Optional:
 - **Split panes:** run Claude inside tmux and start it with `claude --teammate-mode tmux`.
 - **Security review:** Claude Code's built-in `/security-review` is enough. If you want ECC's version, add only that one skill (`npx skills add affaan-m/ECC --skill security-review --agent claude-code`) — do not install the whole ECC plugin for this sprint (hundreds of skills and hooks that overlap Superpowers).
 - **Graphify:** `pipx install graphifyy && graphify install --project`, then `/graphify . --wiki` on your own machine after Checkpoint 1 when the codebase is big enough to be worth mapping. `graphify-out/` is git-ignored on purpose (committing it from three branches guarantees merge conflicts), and do not install the post-commit hook.
+
+### Team sync — seeing each other's progress across laptops
+- Each workstream owns one outbox: `docs/sync/from-A.md`, `from-B.md`, `from-C.md` (done / in progress / blocked / requests / contract changes). Only its owner edits it, so merges never conflict.
+- **Read side (automatic):** hooks run `scripts/team-sync.sh pull` at session start and on each prompt. It does a throttled `git fetch`, reads the other two outboxes straight from their remote branches (`origin/ws-*`), and prints them when they changed, plus any `- to <you>: ...` requests.
+- **Write side (manual):** the lead updates its outbox after each finished task or when blocked, then runs `scripts/team-sync.sh push` (commits the outbox and `docs/progress/<X>.md`, pushes your branch; refuses to run on `main`).
+- **Helping out:** a request addressed to you shows up in your session. Decide with your human lead; help by working in your own files or by telling the owning lead what to change. Never edit another workstream's files.
+- Which workstream you are comes from your branch name (`ws-a-ai`, `ws-b-pay`, `ws-c-app`) or `TEAM_WS=A|B|C`. It is not instant: updates travel when someone runs `push`, and show up on the other side at the next prompt.
 
 ## 2. Start your team — paste into the lead session
 **Set the lead to Opus first** — the committed `.claude/settings.json` already makes Opus the default for this repo; confirm with `/model` (switch with `/model opus` if it shows anything else). Then paste the block for your workstream. Each block tells the lead to spawn its teammates on Sonnet; after the team is created, check the teammate list shows Sonnet and, if not, tell the lead: "Shut down the teammates and re-create them on Sonnet."
