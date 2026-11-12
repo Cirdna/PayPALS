@@ -56,6 +56,7 @@ beforeEach(() => {
   setRawPayPalToolsForTests(tools as never)
   setModelForTests('fast', agentCall(262))
   fake = createFakeDb({ ...seedTables(), matches: [match()] })
+  fake.now = new Date() // the code under test compares row ages with the real clock; a fixed fake epoch goes stale over time
   setDbForTests(fake)
   vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ok: true, result: {} }))))
 })
