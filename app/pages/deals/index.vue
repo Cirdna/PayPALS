@@ -10,7 +10,13 @@ useBackgroundStepper(rows, () => {
 })
 
 const search = ref('')
-const loaded = computed(() => status.value === 'success' || status.value === 'error')
+// Latches after the first response. Background refreshes (every negotiation step, every Realtime change) set the
+// fetch status back to 'pending'; if that hid the grid, the board would flash the skeleton every few seconds.
+// AG Grid updates changed rows in place (getRowId), so the grid stays mounted while new data arrives.
+const loaded = ref(false)
+watch(status, (s) => {
+  if (s === 'success' || s === 'error') loaded.value = true
+}, { immediate: true })
 
 const stats = computed(() => {
   const list = rows.value
@@ -84,7 +90,7 @@ const open = (matchId: string) => navigateTo(`/deals/${matchId}`)
           </UButton>
         </div>
 
-        <ClientOnly v-else-if="status !== 'error'">
+        <ClientOnly v-else-if="status !== 'error' || rows.length > 0">
           <DealsGrid v-if="loaded" :rows="rows" :quick-filter-text="search" @open="open" />
           <div v-else class="space-y-2">
             <USkeleton class="h-10 w-full" />

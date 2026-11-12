@@ -4,7 +4,11 @@ import type { AgentEvent } from '#shared/types'
 
 const { data, refresh, status } = useFetch<AgentEvent[]>('/api/events?limit=30', { server: false, default: () => [] })
 const events = computed<AgentEvent[]>(() => data.value ?? [])
-const loaded = computed(() => status.value === 'success' || status.value === 'error')
+// Latches after the first response so a Realtime refresh does not swap the feed for the skeleton (flashing).
+const loaded = ref(false)
+watch(status, (s) => {
+  if (s === 'success' || s === 'error') loaded.value = true
+}, { immediate: true })
 
 const debouncedRefresh = useDebounced(() => {
   void refresh()
