@@ -241,3 +241,52 @@ describe('runScan (headphones, seeded marketplace)', () => {
     expect(fake.rows('matches')).toHaveLength(0)
   })
 })
+
+describe('runScan (generated demo listings)', () => {
+  const newItem = (over: Row = {}) => ({
+    id: 'wl-mouse', user_id: DEMO_USER_ID, title: 'Ergonomic vertical mouse', query: 'ergonomic vertical mouse', specs: '', max_price: 60, target_price: null,
+    currency: 'USD', min_condition: 'good', dealbreakers: [], status: 'active', last_scanned_at: null, created_at: '2026-11-12T00:00:00.000Z', ...over,
+  })
+  const generated = () => fake.rows('listings').filter((l) => String(l.external_id).startsWith('gen:'))
+
+  beforeEach(() => {
+    vi.spyOn(console, 'info').mockImplementation(() => {})
+    // the accessory ("Protective case for ...") is not the wanted product; everything else matches
+    matchSpy.mockImplementation(async (_item, listings) => listings.map((l) => ({ isMatch: !/^Protective case/.test(l.title), confidence: 0.95, reason: 'test', mismatches: [] })))
+  })
+
+  it('G1. a brand-new item gets generated listings and match rows for them; the accessory is a mismatch', async () => {
+    await fake.from('wishlist_items').insert(newItem())
+    await runScan({ wishlistItemId: 'wl-mouse', userId: DEMO_USER_ID, isCron: false })
+    expect(generated()).toHaveLength(7)
+    const rows = matchRows('wl-mouse')
+    expect(rows).toHaveLength(7)
+    const byExt = (slot: number) => generated().find((l) => l.external_id === `gen:wl-mouse:${slot}`)!
+    expect(rows.find((m) => m.listing_id === byExt(6).id)!.status).toBe('mismatch')
+    expect(rows.find((m) => m.listing_id === byExt(5).id)!.status).toBe('flagged')
+    expect(rows.find((m) => m.listing_id === byExt(0).id)!.status).toBe('over_budget')
+  })
+
+  it('G2. scanning again does not generate again', async () => {
+    await fake.from('wishlist_items').insert(newItem())
+    await runScan({ wishlistItemId: 'wl-mouse', userId: DEMO_USER_ID, isCron: false })
+    const ids = generated().map((l) => l.id).sort()
+    await runScan({ wishlistItemId: 'wl-mouse', userId: DEMO_USER_ID, isCron: false })
+    expect(generated().map((l) => l.id).sort()).toEqual(ids)
+  })
+
+  it('G3. a second user with the same query never sees the first item generated listings', async () => {
+    await fake.from('wishlist_items').insert(newItem())
+    await runScan({ wishlistItemId: 'wl-mouse', userId: DEMO_USER_ID, isCron: false })
+    await fake.from('wishlist_items').insert(newItem({ id: 'wl-mouse-2', user_id: 'other-user' }))
+    await runScan({ wishlistItemId: 'wl-mouse-2', userId: 'other-user', isCron: false })
+    const ownIds = new Set(generated().filter((l) => l.external_id.startsWith('gen:wl-mouse:')).map((l) => l.id))
+    expect(matchRows('wl-mouse-2').filter((m) => ownIds.has(m.listing_id))).toHaveLength(0)
+    expect(generated().filter((l) => l.external_id.startsWith('gen:wl-mouse-2:'))).toHaveLength(7)
+  })
+
+  it('G4. seeded items with enough seeded matches generate nothing', async () => {
+    await scanHeadphones()
+    expect(generated()).toHaveLength(0)
+  })
+})
